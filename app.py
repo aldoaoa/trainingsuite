@@ -37,12 +37,9 @@ tab_dash, tab_semanal, tab_historico, tab_auditoria = st.tabs([
     "🕵️ Auditoría de Brechas"
 ])
 
-# -----------------------------------------------------------------------------
-# PESTAÑA 1: ACTUALIZACIÓN SEMANAL (Motor de Inserción Principal)
-# -----------------------------------------------------------------------------
 with tab_semanal:
-    st.markdown("#### 🔄 Procesamiento de Archivos Semanales de Inducción")
-    st.write("Carga los reportes de Microsoft Forms. El sistema filtrará y estructurará automáticamente todos los cursos impartidos.")
+    st.markdown("#### 🔄 Procesamiento Masivo de Archivos Semanales (Todos los Cursos)")
+    st.write("Carga los reportes de Microsoft Forms. El sistema filtrará y estructurará automáticamente todos los cursos impartidos en un solo paso.")
 
     archivo_sem = st.file_uploader("Subir archivo Excel/CSV (Ej. Inducción Día 1 o Día 2)", type=["csv", "xlsx"], key="up_sem")
 
@@ -69,28 +66,39 @@ with tab_semanal:
                 elif not col_examen or not col_num or not col_calif:
                     st.error("❌ Faltan columnas de control (Examen, ID o Total de puntos).")
                 else:
-                    # Sanitización del nombre del curso (eliminar espacios irrompibles de MS Forms)
+                    # 1. Sanitización masiva de la columna de cursos (eliminar \xa0)
                     df_raw[col_examen] = df_raw[col_examen].astype(str).str.replace(r'\xa0', ' ', regex=True).str.strip()
-                    cursos_disponibles = df_raw[~df_raw[col_examen].isin(['nan', '', 'None', 'NaN'])][col_examen].unique().tolist()
                     
-                    st.markdown("##### 📌 Configuración de Carga")
-                    curso_seleccionado = st.selectbox("Selecciona el curso a procesar:", cursos_disponibles)
+                    # 2. Limpieza de IDs y filtrado de registros válidos
+                    df_raw['num_emp_str'] = df_raw[col_num].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                    
+                    # Máscara para registros que TIENEN curso Y TIENEN ID válido
+                    mask_valida = (
+                        ~df_raw[col_examen].isin(['nan', '', 'None', 'NaN']) & 
+                        ~df_raw['num_emp_str'].isin(['nan', '', 'None', 'N/A', '0']) & 
+                        df_raw[col_num].notna()
+                    )
+                    
+                    df_clean = df_raw[mask_valida].copy()
+                    
+                    # Identificar los que tienen curso pero fallaron por falta de ID
+                    mask_sin_id = ~df_raw[col_examen].isin(['nan', '', 'None', 'NaN']) & ~mask_valida
+                    df_sin_id = df_raw[mask_sin_id].copy()
 
-                    df_curso = df_raw[df_raw[col_examen] == curso_seleccionado].copy()
+                    st.success(f"📊 **Resumen Global del Archivo:**\n- Total de filas crudas: **{len(df_raw)}**\n- Registros válidos listos para guardar: **{len(df_clean)}**")
                     
-                    # Limpieza de IDs
-                    df_curso['num_emp_str'] = df_curso[col_num].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                    mask_sin_id = df_curso['num_emp_str'].isin(['nan', '', 'None', 'N/A', '0']) | df_curso[col_num].isna()
-                    
-                    df_sin_id = df_curso[mask_sin_id]
-                    df_clean = df_curso[~mask_sin_id]
-
-                    st.success(f"📊 Registros listos para '{curso_seleccionado}': **{len(df_clean)}**")
+                    # Mostrar conteo por curso para control visual
+                    if not df_clean.empty:
+                        conteo_cursos = df_clean[col_examen].value_counts().reset_index()
+                        conteo_cursos.columns = ['Curso Detectado', 'Cantidad de Exámenes']
+                        st.markdown("##### 📌 Cursos Identificados en el Archivo")
+                        st.dataframe(conteo_cursos, hide_index=True, use_container_width=True)
 
                     if not df_sin_id.empty:
-                        st.warning(f"⚠️ Se ignorarán {len(df_sin_id)} exámenes sin Número de Empleado.")
+                        st.warning(f"⚠️ Se ignorarán {len(df_sin_id)} exámenes válidos porque no tienen Número de Empleado asignado.")
 
-                    if not df_clean.empty and st.button(f"🚀 Guardar {len(df_clean)} registros de {curso_seleccionado}", type="primary"):
+                    # Botón unificado
+                    if not df_clean.empty and st.button("🚀 Procesar y Guardar Todos los Cursos", type="primary"):
                         with st.spinner("Procesando transacciones..."):
                             
                             # 1. Obtener historial para la llave compuesta anti-duplicados
@@ -109,11 +117,11 @@ with tab_semanal:
                             registros_omitidos = 0
                             cols_preguntas = [c for c in cols if str(c).strip().startswith('Puntos:')]
                             
-                            # Filtro estricto de conceptos que no son evaluables técnicamente
                             palabras_filtro = ['nombre', 'puesto', 'empleado', 'fecha', 'exámen', 'examen', 'qué te pareció', 'desempeño del', 'capacitador', 'comentarios', 'sugerencias']
 
                             for _, row in df_clean.iterrows():
                                 emp_id = str(row['num_emp_str'])
+                                curso_actual = str(row[col_examen]).strip()
                                 
                                 # Manejo de fechas
                                 fecha_raw = row.get(col_fecha, datetime.now())
@@ -124,8 +132,8 @@ with tab_semanal:
                                     fecha_dt = datetime.now()
                                     fecha_val_str = fecha_dt.strftime('%Y-%m-%d')
 
-                                # 2. FILTRO ANTI-DUPLICADOS (Llave de 3 niveles)
-                                llave_unica = f"{emp_id}|{fecha_val_str}|{curso_seleccionado}"
+                                # 2. FILTRO ANTI-DUPLICADOS DINÁMICO
+                                llave_unica = f"{emp_id}|{fecha_val_str}|{curso_actual}"
                                 if llave_unica in set_existentes:
                                     registros_omitidos += 1
                                     continue
@@ -139,7 +147,6 @@ with tab_semanal:
                                     if any(x in cp.lower() for x in palabras_filtro):
                                         continue 
                                     
-                                    # Verificar si el usuario realmente contestó la pregunta (filtro de ramificación MS Forms)
                                     col_respuesta_texto = cp.replace("Puntos: ", "", 1).strip()
                                     if col_respuesta_texto in df_raw.columns:
                                         respuesta = row.get(col_respuesta_texto)
@@ -162,7 +169,7 @@ with tab_semanal:
                                 lote_insercion.append({
                                     "num_empleado": emp_id,
                                     "nombre_empleado": nombre_emp,
-                                    "curso_evaluado": curso_seleccionado,
+                                    "curso_evaluado": curso_actual,
                                     "fecha_entrenamiento": fecha_dt.isoformat(),
                                     "calificacion_total": calif_total,
                                     "detalle_respuestas": detalle,
@@ -174,11 +181,11 @@ with tab_semanal:
                                 for i in range(0, len(lote_insercion), 300):
                                     supabase.table("entrenamientos_planta").insert(lote_insercion[i:i+300]).execute()
                                 
-                                st.success(f"🎉 Sincronización exitosa. {len(lote_insercion)} registros guardados.")
+                                st.success(f"🎉 Sincronización exitosa. {len(lote_insercion)} registros guardados en la base de datos.")
                                 if registros_omitidos > 0:
-                                    st.info(f"💡 Se omitieron {registros_omitidos} registros duplicados.")
+                                    st.info(f"💡 Se omitieron {registros_omitidos} registros duplicados (mismo número de empleado, mismo curso, misma fecha).")
                             else:
-                                st.warning(f"No hay registros nuevos. Se omitieron {registros_omitidos} ya existentes.")
+                                st.warning(f"No hay registros nuevos para guardar. Se omitieron {registros_omitidos} ya existentes.")
             except Exception as e:
                 st.error(f"Error procesando el archivo: {e}")
 
