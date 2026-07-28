@@ -461,28 +461,40 @@ with tab_consulta:
                     # Identificar la última evaluación por cada curso para el cálculo de vigencia
                     df_latest = df_hist.sort_values('fecha_entrenamiento', ascending=False).drop_duplicates(subset=['curso_evaluado'], keep='first').copy()
                     
-                    # Cálculo dinámico de próxima fecha basado en el JSONB o asumiendo 12 meses
+                    # Funciones de extracción desde el JSONB
                     def calcular_proximo(row):
                         detalle = row.get('detalle_respuestas', {})
                         meses = 12 # Anual por defecto
                         if isinstance(detalle, dict) and 'periodicidad_meses' in detalle:
                             meses = int(detalle['periodicidad_meses'])
                         
+                        # Si es periodicidad 0 (Única vez), devolvemos un string en lugar de fecha
+                        if meses == 0:
+                            return "N/A (Permanente)"
                         return (row['fecha_entrenamiento'] + relativedelta(months=meses)).date()
                     
                     def obtener_periodicidad(row):
                         detalle = row.get('detalle_respuestas', {})
                         if isinstance(detalle, dict) and 'periodicidad_meses' in detalle:
-                            return f"{detalle['periodicidad_meses']} meses"
+                            meses = int(detalle['periodicidad_meses'])
+                            # AJUSTE SOLICITADO: Imprimir "Permanente" si meses es 0
+                            return "Permanente" if meses == 0 else f"{meses} meses"
                         return "12 meses"
+                        
+                    def obtener_certificado(row):
+                        detalle = row.get('detalle_respuestas', {})
+                        if isinstance(detalle, dict) and 'num_certificado' in detalle:
+                            return str(detalle['num_certificado'])
+                        return "N/A"
 
                     df_latest['Próximo Vencimiento'] = df_latest.apply(calcular_proximo, axis=1)
                     df_latest['Periodicidad'] = df_latest.apply(obtener_periodicidad, axis=1)
+                    df_latest['Certificado'] = df_latest.apply(obtener_certificado, axis=1)
                     df_latest['Fecha de Curso'] = df_latest['fecha_entrenamiento'].dt.date
                     
                     # Formato para visualización
-                    df_mostrar = df_latest[['curso_evaluado', 'Fecha de Curso', 'Periodicidad', 'Próximo Vencimiento', 'calificacion_total', 'archivo_origen']].copy()
-                    df_mostrar.columns = ['Curso', 'Última Fecha', 'Periodicidad', 'Próximo Vencimiento', 'Calificación', 'Origen']
+                    df_mostrar = df_latest[['curso_evaluado', 'Fecha de Curso', 'Periodicidad', 'Próximo Vencimiento', 'calificacion_total', 'Certificado', 'archivo_origen']].copy()
+                    df_mostrar.columns = ['Curso', 'Última Fecha', 'Periodicidad', 'Próximo Vencimiento', 'Calificación', 'Certificado', 'Origen']
                     
                     # Semáforo de vigencias (Vencido = Rojo, Vigente = Verde)
                     hoy = datetime.now().date()
@@ -494,6 +506,9 @@ with tab_consulta:
                                 return 'background-color: #fff2cc; color: #b38600; font-weight: bold;'
                             else:
                                 return 'background-color: #e2f0d9; color: #385723;'
+                        elif val == "N/A (Permanente)":
+                            # Verde para los permanentes
+                            return 'background-color: #e2f0d9; color: #385723;'
                         return ''
 
                     st.dataframe(df_mostrar.style.map(estilo_vigencia, subset=['Próximo Vencimiento']), use_container_width=True, hide_index=True)
@@ -516,6 +531,8 @@ with tab_consulta:
                     n_fecha = st.date_input("Fecha de Certificación:", datetime.now().date())
                     n_calificacion = st.number_input("Calificación Obtenida (0-10):", min_value=0.0, max_value=10.0, value=10.0, step=0.1)
                     
+                    n_certificado = st.text_input("Número de Certificado (Opcional):")
+                    
                     n_periodicidad = st.selectbox("Periodicidad de Reentrenamiento:", [
                         (12, "Anual (12 meses)"), 
                         (6, "Semestral (6 meses)"), 
@@ -531,11 +548,14 @@ with tab_consulta:
                         if not curso_final:
                             st.error("Debes especificar el nombre del curso.")
                         else:
-                            # Inyectamos la periodicidad en el JSON de detalle
+                            # Inyectamos la periodicidad y el certificado en el JSON de detalle
                             json_manual = {
                                 "tipo_ingreso": "Registro Manual HR",
                                 "periodicidad_meses": n_periodicidad[0]
                             }
+                            
+                            if n_certificado.strip():
+                                json_manual["num_certificado"] = n_certificado.strip()
                             
                             payload = {
                                 "num_empleado": emp_id,
