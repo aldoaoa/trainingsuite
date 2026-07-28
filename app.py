@@ -119,8 +119,6 @@ with tab_semanal:
                             registros_omitidos = 0
                             cols_preguntas = [c for c in cols if str(c).strip().startswith('Puntos:')]
                             
-                            # --- NUEVA LÓGICA DE EXTRACCIÓN DE PUNTAJES ---
-                                
                             # Palabras clave para detectar preguntas de retroalimentación que NO se evalúan
                             palabras_filtro = [
                                 'nombre', 'puesto', 'empleado', 'fecha', 'exámen', 'examen', 
@@ -130,53 +128,74 @@ with tab_semanal:
                                 'lee a continuación y califica'
                             ]
 
-                            detalle = {}
-                            
-                            # Iteramos sobre todas las columnas de "Puntos:"
-                            for cp in cols_preguntas:
-                                # Extraer el texto exacto de la pregunta eliminando el prefijo "Puntos: "
-                                col_respuesta_texto = cp.replace("Puntos: ", "", 1).strip()
+                            # INICIO DEL CICLO
+                            for _, row in df_clean.iterrows():
+                                emp_id = str(row['num_emp_str'])
+                                curso_actual = str(row[col_examen]).strip()
                                 
-                                # 1. IGNORAR PREGUNTAS DE RETROALIMENTACIÓN
-                                # Si la pregunta contiene alguna frase de nuestro filtro, la ignoramos.
-                                if any(x in col_respuesta_texto.lower() for x in palabras_filtro):
-                                    continue 
-                                
-                                # 2. VALIDAR SI EL USUARIO CONTESTÓ LA PREGUNTA
-                                if col_respuesta_texto in df_raw.columns:
-                                    respuesta = row.get(col_respuesta_texto)
-                                    # Solo tomamos en cuenta la pregunta si hay texto/respuesta válida
-                                    if pd.notna(respuesta) and str(respuesta).strip() != '':
-                                        
-                                        # Extraer los puntos obtenidos
-                                        val_raw = row.get(cp, 0)
-                                        try:
-                                            puntos = 0.0 if pd.isna(float(val_raw)) else float(val_raw)
-                                        except:
-                                            puntos = 0.0
-                                            
-                                        detalle[cp] = puntos
-                            
-                            # 3. CÁLCULO DE CALIFICACIÓN (Solo sobre lo contestado)
-                            total_reactivos = len(detalle)
-                            if total_reactivos > 0:
-                                # Contamos cuántas respuestas correctas (puntos > 0) tiene en el diccionario
-                                aciertos = sum([1.0 for v in detalle.values() if float(v) > 0])
-                                calif_total = round((aciertos / total_reactivos) * 10.0, 2)
-                            else:
-                                calif_total = 0.0
-                            # --- FIN NUEVA LÓGICA ---
-                            # --- HASTA AQUÍ ---
+                                # Manejo de fechas
+                                fecha_raw = row.get(col_fecha, datetime.now())
+                                try:
+                                    fecha_dt = pd.to_datetime(fecha_raw)
+                                    fecha_val_str = fecha_dt.strftime('%Y-%m-%d')
+                                except:
+                                    fecha_dt = datetime.now()
+                                    fecha_val_str = fecha_dt.strftime('%Y-%m-%d')
 
-                            lote_insercion.append({
-                                "num_empleado": emp_id,
-                                "nombre_empleado": nombre_emp,
-                                "curso_evaluado": curso_actual,
-                                "fecha_entrenamiento": fecha_dt.isoformat(),
-                                "calificacion_total": calif_total,
-                                "detalle_respuestas": detalle,
-                                "archivo_origen": archivo_sem.name
-                            })
+                                # 2. FILTRO ANTI-DUPLICADOS DINÁMICO
+                                llave_unica = f"{emp_id}|{fecha_val_str}|{curso_actual}"
+                                if llave_unica in set_existentes:
+                                    registros_omitidos += 1
+                                    continue
+                                
+                                raw_nombre = row.get(col_nom)
+                                nombre_emp = "Sin Nombre" if pd.isna(raw_nombre) else str(raw_nombre).strip()[:100]
+
+                                # --- NUEVA LÓGICA DE EXTRACCIÓN DE PUNTAJES ---
+                                detalle = {}
+                                
+                                # Iteramos sobre todas las columnas de "Puntos:"
+                                for cp in cols_preguntas:
+                                    # Extraer el texto exacto de la pregunta eliminando el prefijo "Puntos: "
+                                    col_respuesta_texto = cp.replace("Puntos: ", "", 1).strip()
+                                    
+                                    # 1. IGNORAR PREGUNTAS DE RETROALIMENTACIÓN
+                                    if any(x in col_respuesta_texto.lower() for x in palabras_filtro):
+                                        continue 
+                                    
+                                    # 2. VALIDAR SI EL USUARIO CONTESTÓ LA PREGUNTA
+                                    if col_respuesta_texto in df_raw.columns:
+                                        respuesta = row.get(col_respuesta_texto)
+                                        # Solo tomamos en cuenta la pregunta si hay texto/respuesta válida
+                                        if pd.notna(respuesta) and str(respuesta).strip() != '':
+                                            
+                                            # Extraer los puntos obtenidos
+                                            val_raw = row.get(cp, 0)
+                                            try:
+                                                puntos = 0.0 if pd.isna(float(val_raw)) else float(val_raw)
+                                            except:
+                                                puntos = 0.0
+                                                
+                                            detalle[cp] = puntos
+                                
+                                # 3. CÁLCULO DE CALIFICACIÓN (Solo sobre lo contestado)
+                                total_reactivos = len(detalle)
+                                if total_reactivos > 0:
+                                    aciertos = sum([1.0 for v in detalle.values() if float(v) > 0])
+                                    calif_total = round((aciertos / total_reactivos) * 10.0, 2)
+                                else:
+                                    calif_total = 0.0
+                                # --- FIN NUEVA LÓGICA ---
+
+                                lote_insercion.append({
+                                    "num_empleado": emp_id,
+                                    "nombre_empleado": nombre_emp,
+                                    "curso_evaluado": curso_actual,
+                                    "fecha_entrenamiento": fecha_dt.isoformat(),
+                                    "calificacion_total": calif_total,
+                                    "detalle_respuestas": detalle,
+                                    "archivo_origen": archivo_sem.name
+                                })
 
                             # 3. Inserción Masiva
                             if lote_insercion:
