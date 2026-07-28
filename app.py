@@ -277,7 +277,15 @@ with tab_hc:
                                 fecha_ingreso = None
                                 
                             # Absorber todas las columnas del Excel en formato crudo para el JSON
-                            datos_json = row.fillna("").to_dict()
+                            # Pandas devuelve objetos Timestamp que no son serializables por JSON, los pasamos a string
+                            datos_json_crudo = row.fillna("").to_dict()
+                            datos_json = {}
+                            for key, value in datos_json_crudo.items():
+                                # Si el valor es de tipo Timestamp de pandas o un date de Python, lo pasamos a texto
+                                if isinstance(value, pd.Timestamp) or type(value).__name__ in ['Timestamp', 'date', 'datetime']:
+                                    datos_json[key] = str(value)
+                                else:
+                                    datos_json[key] = value
                             
                             estatus_reportado = str(row.get('Employment Status', 'Active')).strip()
                             
@@ -313,10 +321,157 @@ with tab_hc:
             except Exception as e:
                 st.error(f"Error procesando el archivo: {e}")
 # -----------------------------------------------------------------------------
-# PESTAÑA 3 & 4 (Estructura base para expansión)
+# PESTAÑA: CARGA MASIVA DE HISTÓRICO
 # -----------------------------------------------------------------------------
 with tab_historico:
-    st.info("Sigue la misma lógica de la Pestaña de Actualización Semanal, pero adaptada para ingestar múltiples archivos a la vez iterando sobre `st.file_uploader(accept_multiple_files=True)`.")
+    st.markdown("#### 📥 Carga Masiva de Historial (Múltiples Archivos)")
+    st.write("Sube todos tus archivos antiguos de Forms a la vez. El sistema procesará cada Excel/CSV iterativamente, separará los cursos y descartará lo que ya esté en la base de datos.")
+
+    archivos_hist = st.file_uploader("Seleccionar archivos históricos", type=["csv", "xlsx"], accept_multiple_files=True, key="up_hist")
+
+    if archivos_hist:
+        if st.button("🚀 Procesar Todo el Histórico", type="primary"):
+            
+            with st.spinner("Descargando llaves de la base de datos para evitar duplicados..."):
+                # 1. Traer historial existente UNA SOLA VEZ para todos los archivos
+                try:
+                    resp_existentes = supabase.table("entrenamientos_planta").select("num_empleado, fecha_entrenamiento, curso_evaluado").execute()
+                    set_existentes = set()
+                    for x in resp_existentes.data:
+                        e_db = str(x.get('num_empleado')).strip()
+                        f_db = str(x.get('fecha_entrenamiento'))[:10]
+                        c_db = str(x.get('curso_evaluado')).strip()
+                        set_existentes.add(f"{e_db}|{f_db}|{c_db}")
+                except Exception as e:
+                    set_existentes = set()
+                    st.warning(f"Error al conectar con la base de datos: {e}")
+
+            lote_insercion_global = []
+            registros_omitidos_global = 0
+            archivos_procesados = 0
+            archivos_con_error = []
+
+            # Filtro estricto de conceptos que no son evaluables
+            palabras_filtro = ['nombre', 'puesto', 'empleado', 'fecha', 'exámen', 'examen', 'qué te pareció', 'que te parecio', 'desempeño del', 'capacitador', 'comentarios', 'sugerencias', 'instructor']
+
+            barra_progreso = st.progress(0)
+            
+            for idx, archivo in enumerate(archivos_hist):
+                try:
+                    if archivo.name.endswith('.csv'):
+                        df_raw = pd.read_csv(archivo)
+                    else:
+                        df_raw = pd.read_excel(archivo)
+
+                    cols = [str(c).strip() for c in df_raw.columns]
+                    df_raw.columns = cols
+                    
+                    # Búsqueda dinámica de columnas (relajando el nombre para históricos)
+                    col_examen = next((c for c in cols if 'exámen va a presentar' in c.lower() or 'examen va a presentar' in c.lower()), None)
+                    col_num = next((c for c in cols if 'número de empleado' in c.lower() or 'numero de empleado' in c.lower()), None)
+                    col_nom = next((c for c in cols if 'nombre' in c.lower()), 'Nombre Completo')
+                    col_fecha = next((c for c in cols if 'hora de finalización' in c.lower() or 'fecha que se realiza' in c.lower()), None)
+                    
+                    # Si no tiene columnas clave, lo reportamos y pasamos al siguiente archivo
+                    if not col_examen or not col_num:
+                        archivos_con_error.append(f"{archivo.name} (Faltan columnas clave como Examen o Número de Empleado)")
+                        continue
+
+                    # Sanitización masiva
+                    df_raw[col_examen] = df_raw[col_examen].astype(str).str.replace(r'\xa0', ' ', regex=True).str.strip()
+                    df_raw['num_emp_str'] = df_raw[col_num].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                    
+                    # Filtrado de registros válidos
+                    mask_valida = (
+                        ~df_raw[col_examen].isin(['nan', '', 'None', 'NaN']) & 
+                        ~df_raw['num_emp_str'].isin(['nan', '', 'None', 'N/A', '0']) & 
+                        df_raw[col_num].notna()
+                    )
+                    df_clean = df_raw[mask_valida]
+
+                    cols_preguntas = [c for c in cols if str(c).strip().startswith('Puntos:')]
+
+                    for _, row in df_clean.iterrows():
+                        emp_id = str(row['num_emp_str'])
+                        curso_actual = str(row[col_examen]).strip()
+                        
+                        # Fechas
+                        fecha_raw = row.get(col_fecha, datetime.now())
+                        try:
+                            fecha_dt = pd.to_datetime(fecha_raw)
+                            fecha_val_str = fecha_dt.strftime('%Y-%m-%d')
+                        except:
+                            fecha_dt = datetime.now()
+                            fecha_val_str = fecha_dt.strftime('%Y-%m-%d')
+
+                        # Anti-duplicados (Compara contra BD y contra lo que se va acumulando en esta misma sesión)
+                        llave_unica = f"{emp_id}|{fecha_val_str}|{curso_actual}"
+                        if llave_unica in set_existentes:
+                            registros_omitidos_global += 1
+                            continue
+                        
+                        raw_nombre = row.get(col_nom)
+                        nombre_emp = "Sin Nombre" if pd.isna(raw_nombre) else str(raw_nombre).strip()[:100]
+
+                        # Extraer puntajes
+                        detalle = {}
+                        for cp in cols_preguntas:
+                            if any(x in cp.lower() for x in palabras_filtro):
+                                continue 
+                            
+                            col_respuesta_texto = cp.replace("Puntos: ", "", 1).strip()
+                            if col_respuesta_texto in df_raw.columns:
+                                respuesta = row.get(col_respuesta_texto)
+                                if pd.isna(respuesta) or str(respuesta).strip() == '':
+                                    continue 
+
+                            val_raw = row.get(cp, 0)
+                            try:
+                                detalle[cp] = 0.0 if pd.isna(float(val_raw)) else float(val_raw)
+                            except:
+                                detalle[cp] = 0.0
+
+                        total_reactivos = len(detalle)
+                        if total_reactivos > 0:
+                            aciertos = sum([1.0 for v in detalle.values() if float(v) > 0])
+                            calif_total = round((aciertos / total_reactivos) * 10.0, 2)
+                        else:
+                            calif_total = 0.0
+
+                        lote_insercion_global.append({
+                            "num_empleado": emp_id,
+                            "nombre_empleado": nombre_emp,
+                            "curso_evaluado": curso_actual,
+                            "fecha_entrenamiento": fecha_dt.isoformat(),
+                            "calificacion_total": calif_total,
+                            "detalle_respuestas": detalle,
+                            "archivo_origen": archivo.name
+                        })
+                        
+                        # Alimentar el set temporal para que un archivo duplicado en la misma carga no se inserte 2 veces
+                        set_existentes.add(llave_unica)
+                        
+                    archivos_procesados += 1
+                except Exception as e:
+                    archivos_con_error.append(f"{archivo.name} (Error: {e})")
+                
+                # Actualizar barra de progreso visual en Streamlit
+                barra_progreso.progress((idx + 1) / len(archivos_hist))
+
+            # 3. Inserción masiva final (fuera del ciclo de los archivos)
+            if lote_insercion_global:
+                with st.spinner("Insertando lote masivo en Supabase... esto puede tomar unos segundos."):
+                    for i in range(0, len(lote_insercion_global), 300):
+                        supabase.table("entrenamientos_planta").insert(lote_insercion_global[i:i+300]).execute()
+                
+                st.success(f"🎉 **¡Carga Histórica Completada!**\n\n- **Archivos procesados:** {archivos_procesados}\n- **Registros guardados en BD:** {len(lote_insercion_global)}\n- **Duplicados omitidos:** {registros_omitidos_global}")
+            else:
+                st.info(f"Se procesaron {len(archivos_hist)} archivo(s), pero no hubo registros nuevos. Se omitieron {registros_omitidos_global} duplicados.")
+
+            if archivos_con_error:
+                st.error("⚠️ Se encontraron problemas con los siguientes archivos y fueron ignorados:")
+                for err in archivos_con_error:
+                    st.write(f"- {err}")
 
 with tab_auditoria:
     st.info("El escaneo cronológico ahora requerirá agrupar por `num_empleado` y por `curso_evaluado` para buscar brechas de tiempo (gaps) independientemente en cada materia.")
