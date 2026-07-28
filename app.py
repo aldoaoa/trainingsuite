@@ -101,6 +101,7 @@ with tab_dash:
                     
                     st.divider()
                     
+                    # --- GRÁFICAS CON TU ESQUEMA DE COLORES ---
                     col_graf1, col_graf2 = st.columns(2)
                     
                     df_filtrado['Estatus'] = df_filtrado['calificacion_total'].apply(lambda x: 'Aprobado (≥ 8)' if x >= 8 else 'Reprobado (< 8)')
@@ -113,7 +114,16 @@ with tab_dash:
                         resumen_estatus, values='Cantidad', names='Estatus', 
                         title="Distribución de Aprobación en Planta", color='Estatus', color_discrete_map=mapa_colores
                     )
-                    col_graf1.plotly_chart(fig_pie, use_container_width=True)
+                    
+                    # Forzamos los textos en negro y fondo blanco
+                    fig_pie.update_layout(
+                        paper_bgcolor='#FFFFFF',
+                        font=dict(color='#000000'),
+                        title_font=dict(color='#000000', size=16),
+                        legend=dict(font=dict(color='#000000'))
+                    )
+                    # theme=None bloquea el modo oscuro automático de Streamlit
+                    col_graf1.plotly_chart(fig_pie, use_container_width=True, theme=None)
                     
                     if filtro_depto == "Todos":
                         resumen_deptos = df_filtrado.groupby('departamento').agg(
@@ -124,8 +134,27 @@ with tab_dash:
                             resumen_deptos, x='Promedio', y='departamento', orientation='h', 
                             title="Promedio por Departamento (Top 10 Volumen)", color_discrete_sequence=['#8D1537'], text_auto='.1f'
                         )
-                        fig_bar.update_layout(yaxis={'categoryorder':'total ascending'}, plot_bgcolor='#F2F2F2', paper_bgcolor='#FFFFFF', font=dict(color='#000000'))
-                        col_graf2.plotly_chart(fig_bar, use_container_width=True)
+                        
+                        # Definimos explícitamente el color negro (#000000) para todos los textos periféricos
+                        fig_bar.update_layout(
+                            yaxis={
+                                'categoryorder':'total ascending', 
+                                'tickfont': {'color': '#000000', 'size': 11}, 
+                                'title_font': {'color': '#000000', 'size': 12}
+                            },
+                            xaxis={
+                                'tickfont': {'color': '#000000'}, 
+                                'title_font': {'color': '#000000', 'size': 12}
+                            },
+                            plot_bgcolor='#F2F2F2', 
+                            paper_bgcolor='#FFFFFF', 
+                            font=dict(color='#000000'),
+                            title_font=dict(color='#000000', size=16)
+                        )
+                        # Aseguramos que el texto de la calificación DENTRO de la barra (rojo oscuro) sea blanco
+                        fig_bar.update_traces(textfont_color='#FFFFFF') 
+                        
+                        col_graf2.plotly_chart(fig_bar, use_container_width=True, theme=None)
                 else:
                     st.warning("No hay datos para los filtros seleccionados.")
 
