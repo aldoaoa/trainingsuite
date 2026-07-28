@@ -918,5 +918,184 @@ with tab_certificados:
                 st.warning("Este empleado no tiene cursos registrados con calificación aprobatoria (≥ 8.0).")
 
                 
+# -----------------------------------------------------------------------------
+# PESTAÑA 5: AUDITORÍA CRONOLÓGICA (BRECHAS Y REENTRENAMIENTOS)
+# -----------------------------------------------------------------------------
 with tab_auditoria:
-    st.info("El escaneo cronológico ahora requerirá agrupar por `num_empleado` y por `curso_evaluado` para buscar brechas de tiempo (gaps) independientemente en cada materia.")
+    st.markdown("#### 🕵️ Auditoría de Cumplimiento (Gaps y Reentrenamientos)")
+    st.info("Esta herramienta recorre la línea de tiempo de cada colaborador por curso y detecta dos anomalías críticas: **1)** Brechas que excedan la periodicidad del curso. **2)** Reentrenamientos que tardaron **más de 2 días** tras una reprobación (< 8.0).")
+
+    if "anomalias_entrenamiento" not in st.session_state:
+        st.session_state.anomalias_entrenamiento = None
+
+    if st.button("🔍 Escanear Historial Completo", type="secondary", use_container_width=True):
+        with st.spinner("Cruzando padrón y analizando líneas de tiempo por materia..."):
+            try:
+                # 1. Traer solo personal activo y su fecha de ingreso
+                resp_emp = supabase.table("empleados_planta").select("num_empleado, nombre_completo, fecha_ingreso").eq("estatus", "Active").execute()
+                df_emp = pd.DataFrame(resp_emp.data)
+                
+                dict_ingreso = {}
+                dict_nombres = {}
+                if not df_emp.empty:
+                    df_emp['num_empleado'] = df_emp['num_empleado'].astype(str).str.strip()
+                    dict_ingreso = dict(zip(df_emp['num_empleado'], df_emp['fecha_ingreso']))
+                    dict_nombres = dict(zip(df_emp['num_empleado'], df_emp['nombre_completo']))
+
+                # 2. Traer todo el historial de exámenes ordenado por fecha
+                resp_train = supabase.table("entrenamientos_planta").select("id, num_empleado, curso_evaluado, fecha_entrenamiento, calificacion_total, detalle_respuestas").order("fecha_entrenamiento").execute()
+                df_train = pd.DataFrame(resp_train.data)
+
+                anomalias_encontradas = []
+
+                if not df_train.empty and not df_emp.empty:
+                    df_train['fecha_dt'] = pd.to_datetime(df_train['fecha_entrenamiento'], errors='coerce')
+                    df_train['num_empleado'] = df_train['num_empleado'].astype(str).str.strip()
+                    
+                    # Filtrar historial solo para personal activo
+                    df_train = df_train[df_train['num_empleado'].isin(dict_ingreso.keys())]
+                    df_train = df_train.dropna(subset=['fecha_dt'])
+
+                    # Ordenar por empleado -> curso -> fecha (Cronología perfecta por materia)
+                    df_train = df_train.sort_values(by=['num_empleado', 'curso_evaluado', 'fecha_dt'])
+
+                    # 3. Agrupar y recorrer
+                    for (emp, curso), group in df_train.groupby(['num_empleado', 'curso_evaluado']):
+                        group = group.reset_index(drop=True)
+                        
+                        f_ingreso_raw = dict_ingreso.get(emp)
+                        f_ingreso_str = str(f_ingreso_raw)[:10] if pd.notna(f_ingreso_raw) and str(f_ingreso_raw).strip() != '' else "N/D"
+                        nombre_emp = dict_nombres.get(emp, "N/D")
+
+                        for i in range(len(group)):
+                            row_actual = group.iloc[i]
+                            
+                            # Si hay un examen previo de ESE MISMO CURSO, comparamos
+                            if i > 0:
+                                row_prev = group.iloc[i-1]
+                                dias_transcurridos = (row_actual['fecha_dt'].date() - row_prev['fecha_dt'].date()).days
+                                
+                                try: nota_previa = float(row_prev['calificacion_total'])
+                                except: nota_previa = 10.0
+                                
+                                try: nota_siguiente = float(row_actual['calificacion_total'])
+                                except: nota_siguiente = 0.0
+
+                                # Extraer periodicidad del JSON anterior para calcular el vencimiento exacto
+                                detalle_prev = row_prev.get('detalle_respuestas', {})
+                                meses_vigencia = 12
+                                if isinstance(detalle_prev, dict) and 'periodicidad_meses' in detalle_prev:
+                                    meses_vigencia = int(detalle_prev['periodicidad_meses'])
+
+                                # Base del registro anómalo
+                                registro_base = {
+                                    "id_bd_actual": row_actual['id'],
+                                    "id_bd_previo": row_prev['id'],
+                                    "No. Empleado": emp,
+                                    "Nombre": nombre_emp,
+                                    "Curso": curso,
+                                    "Fecha Ingreso": f_ingreso_str,
+                                    "Fecha Examen Previo": row_prev['fecha_dt'].strftime('%Y-%m-%d'),
+                                    "Nueva Fecha Previa": row_prev['fecha_dt'].strftime('%Y-%m-%d'),
+                                    "Nota Previa": nota_previa,
+                                    "Fecha Siguiente Examen": row_actual['fecha_dt'].strftime('%Y-%m-%d'),
+                                    "Nueva Fecha (Correcta)": row_actual['fecha_dt'].strftime('%Y-%m-%d'),
+                                    "Nota Siguiente Examen": nota_siguiente,
+                                    "Días Transcurridos": dias_transcurridos
+                                }
+
+                                # --- REGLA A: REENTRENAMIENTO TRAS FALLA (< 8.0) ---
+                                if nota_previa < 8.0:
+                                    if dias_transcurridos > 2:
+                                        reg_falla = registro_base.copy()
+                                        reg_falla["Motivo de Alerta"] = "Reentrenamiento Tardío (Falla)"
+                                        anomalias_encontradas.append(reg_falla)
+                                        continue 
+
+                                # --- REGLA B: BRECHA DE CERTIFICACIÓN EXCEDIDA ---
+                                if meses_vigencia > 0: # Si es 0 (Permanente), no hay brecha que romper
+                                    fecha_limite = (row_prev['fecha_dt'] + relativedelta(months=meses_vigencia)).date()
+                                    if row_actual['fecha_dt'].date() > fecha_limite:
+                                        reg_brecha = registro_base.copy()
+                                        reg_brecha["Motivo de Alerta"] = f"Brecha Excedida (Límite era {fecha_limite.strftime('%Y-%m-%d')})"
+                                        anomalias_encontradas.append(reg_brecha)
+
+                st.session_state.anomalias_entrenamiento = anomalias_encontradas
+
+            except Exception as e:
+                st.error(f"Error al analizar el historial: {e}")
+
+    # --- EDITOR Y GUARDADO ---
+    if st.session_state.anomalias_entrenamiento is not None:
+        lista_anomalias = st.session_state.anomalias_entrenamiento
+        st.divider()
+        
+        if len(lista_anomalias) == 0:
+            st.success("✨ ¡Cumplimiento cronológico perfecto! No se encontraron brechas ni retrasos.")
+        else:
+            st.warning(f"⚠️ **Atención: Se encontraron {len(lista_anomalias)} registros anómalos.** Puedes editar las fechas haciendo clic en las celdas correspondientes.")
+            
+            df_anomalias = pd.DataFrame(lista_anomalias)
+            
+            cols_ordenadas = [
+                "id_bd_actual", "id_bd_previo", "No. Empleado", "Nombre", "Curso", 
+                "Motivo de Alerta", "Fecha Examen Previo", "Nueva Fecha Previa", 
+                "Nota Previa", "Días Transcurridos", "Fecha Siguiente Examen", 
+                "Nueva Fecha (Correcta)", "Nota Siguiente Examen"
+            ]
+            df_anomalias = df_anomalias[[c for c in cols_ordenadas if c in df_anomalias.columns]]
+
+            editor_train = st.data_editor(
+                df_anomalias,
+                column_config={
+                    "id_bd_actual": None, "id_bd_previo": None,
+                    "No. Empleado": st.column_config.TextColumn("ID", disabled=True),
+                    "Nombre": st.column_config.TextColumn("Nombre", disabled=True),
+                    "Curso": st.column_config.TextColumn("Curso", disabled=True),
+                    "Motivo de Alerta": st.column_config.TextColumn("Anomalía Detectada", disabled=True),
+                    "Fecha Examen Previo": st.column_config.TextColumn("Examen Previo (Original)", disabled=True),
+                    "Nueva Fecha Previa": st.column_config.DateColumn("Corregir Examen Previo"),
+                    "Nota Previa": st.column_config.NumberColumn("Nota 1", disabled=True),
+                    "Días Transcurridos": st.column_config.NumberColumn("Días Gap", disabled=True),
+                    "Fecha Siguiente Examen": st.column_config.TextColumn("Examen Sig. (Original)", disabled=True),
+                    "Nueva Fecha (Correcta)": st.column_config.DateColumn("Corregir Examen Sig."),
+                    "Nota Siguiente Examen": st.column_config.NumberColumn("Nota 2", disabled=True),
+                },
+                hide_index=True,
+                width='stretch',
+                key="editor_train_audit"
+            )
+            
+            if st.button("💾 Guardar Correcciones", type="primary", use_container_width=True):
+                cambios = st.session_state.editor_train_audit.get("edited_rows", {})
+                if not cambios:
+                    st.info("No hay cambios pendientes.")
+                else:
+                    with st.spinner("Sincronizando actualizaciones SQL..."):
+                        errores = 0
+                        for idx_str, edits in cambios.items():
+                            idx = int(idx_str)
+                            fila = df_anomalias.iloc[idx]
+                            
+                            # Actualizar fecha del examen actual
+                            if "Nueva Fecha (Correcta)" in edits:
+                                try:
+                                    nueva_fecha = str(edits["Nueva Fecha (Correcta)"]) + "T12:00:00"
+                                    supabase.table("entrenamientos_planta").update({"fecha_entrenamiento": nueva_fecha}).eq("id", fila['id_bd_actual']).execute()
+                                except: errores += 1
+                                
+                            # Actualizar fecha del examen previo
+                            if "Nueva Fecha Previa" in edits:
+                                try:
+                                    nueva_fecha_prev = str(edits["Nueva Fecha Previa"]) + "T12:00:00"
+                                    supabase.table("entrenamientos_planta").update({"fecha_entrenamiento": nueva_fecha_prev}).eq("id", fila['id_bd_previo']).execute()
+                                except: errores += 1
+                        
+                        if errores == 0:
+                            st.success("✅ ¡Registros actualizados correctamente! Vuelve a escanear para verificar.")
+                            st.session_state.anomalias_entrenamiento = None
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(f"Se encontraron {errores} errores durante la actualización.")
