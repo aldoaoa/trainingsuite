@@ -517,8 +517,7 @@ with tab_consulta:
 
             with col_registro:
                 st.markdown("#### ➕ Registrar Certificación Manual")
-                with st.form("form_nuevo_curso"):
-                    # Extraer cursos existentes para autocompletar, o permitir escribir uno nuevo
+                with st.form("form_nuevo_curso", clear_on_submit=True): # Limpia el formulario al guardar
                     try:
                         resp_cursos = supabase.table("entrenamientos_planta").select("curso_evaluado").execute()
                         cursos_unicos = sorted(list(set([x['curso_evaluado'] for x in resp_cursos.data])))
@@ -542,36 +541,42 @@ with tab_consulta:
 
                     submit_manual = st.form_submit_button("💾 Guardar Registro", type="primary", use_container_width=True)
 
-                    if submit_manual:
-                        curso_final = n_curso_manual.strip() if n_curso == "-- OTRO (Escribir abajo) --" else n_curso.strip()
+                # EVALUAMOS EL BOTÓN FUERA DEL st.form()
+                if submit_manual:
+                    curso_final = n_curso_manual.strip() if n_curso == "-- OTRO (Escribir abajo) --" else n_curso.strip()
+                    
+                    if not curso_final:
+                        st.error("Debes especificar el nombre del curso.")
+                    else:
+                        json_manual = {
+                            "tipo_ingreso": "Registro Manual HR",
+                            "periodicidad_meses": n_periodicidad[0]
+                        }
                         
-                        if not curso_final:
-                            st.error("Debes especificar el nombre del curso.")
-                        else:
-                            # Inyectamos la periodicidad y el certificado en el JSON de detalle
-                            json_manual = {
-                                "tipo_ingreso": "Registro Manual HR",
-                                "periodicidad_meses": n_periodicidad[0]
-                            }
-                            
-                            if n_certificado.strip():
-                                json_manual["num_certificado"] = n_certificado.strip()
-                            
-                            payload = {
-                                "num_empleado": emp_id,
-                                "nombre_empleado": datos_empleado['nombre_completo'],
-                                "curso_evaluado": curso_final,
-                                "fecha_entrenamiento": n_fecha.isoformat() + "T12:00:00",
-                                "calificacion_total": float(n_calificacion),
-                                "detalle_respuestas": json_manual,
-                                "archivo_origen": "REGISTRO MANUAL"
-                            }
-                            
+                        if n_certificado.strip():
+                            json_manual["num_certificado"] = n_certificado.strip()
+                        
+                        payload = {
+                            "num_empleado": emp_id,
+                            "nombre_empleado": datos_empleado['nombre_completo'],
+                            "curso_evaluado": curso_final,
+                            "fecha_entrenamiento": n_fecha.isoformat() + "T12:00:00",
+                            "calificacion_total": float(n_calificacion),
+                            "detalle_respuestas": json_manual,
+                            "archivo_origen": "REGISTRO MANUAL"
+                        }
+                        
+                        with st.spinner("Guardando en la base de datos..."):
                             try:
+                                # Insertamos
                                 supabase.table("entrenamientos_planta").insert(payload).execute()
-                                st.success("✅ Registro guardado correctamente.")
-                                time.sleep(1)
-                                st.rerun()
+                                
+                                # Borramos cualquier caché previo que pudiera estar leyendo datos viejos
+                                st.cache_data.clear() 
+                                
+                                st.success("✅ Registro guardado correctamente. Actualizando pantalla...")
+                                time.sleep(1.5) # Le damos tiempo real a Supabase para indexar
+                                st.rerun() # Refrescamos toda la app
                             except Exception as e:
                                 st.error(f"Error al guardar: {e}")
 
