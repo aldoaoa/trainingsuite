@@ -39,7 +39,7 @@ tab_dash, tab_gestion_datos, tab_consulta, tab_auditoria = st.tabs([
 ])
 
 # -----------------------------------------------------------------------------
-# PESTAÑA 1: DASHBOARD INTERACTIVO
+# PESTAÑA 1: DASHBOARD INTERACTIVO Y PROYECCIÓN
 # -----------------------------------------------------------------------------
 with tab_dash:
     st.markdown("#### 📊 Dashboard de Certificación y Cumplimiento")
@@ -47,10 +47,12 @@ with tab_dash:
     
     with st.spinner("Sincronizando padrón y evaluaciones..."):
         try:
+            # 1. Traer SOLO personal con estatus 'Active' de la tabla maestra
             resp_emp = supabase.table("empleados_planta").select("num_empleado, nombre_completo, departamento, area").eq("estatus", "Active").execute()
             df_activos = pd.DataFrame(resp_emp.data)
             
-            resp_train = supabase.table("entrenamientos_planta").select("num_empleado, fecha_entrenamiento, calificacion_total, curso_evaluado").execute()
+            # 2. Traer TODO el historial de entrenamientos
+            resp_train = supabase.table("entrenamientos_planta").select("num_empleado, fecha_entrenamiento, calificacion_total, curso_evaluado, detalle_respuestas").execute()
             df_train = pd.DataFrame(resp_train.data)
         except Exception as e:
             df_activos = pd.DataFrame()
@@ -58,69 +60,148 @@ with tab_dash:
             st.error(f"Error al conectar con la base de datos: {e}")
 
     if not df_activos.empty and not df_train.empty:
+        # 3. EL CROSS CHECK (INNER JOIN): Descarta a cualquiera que no esté en df_activos
         df_dash = pd.merge(df_train, df_activos, on="num_empleado", how="inner")
         
         if not df_dash.empty:
             df_dash['fecha_entrenamiento'] = pd.to_datetime(df_dash['fecha_entrenamiento'])
             
-            c_filtro1, c_filtro2 = st.columns(2)
-            cursos_db = sorted(df_dash['curso_evaluado'].unique().tolist())
-            filtro_curso = c_filtro1.selectbox("Filtro por Curso:", ["Todos"] + cursos_db)
-            
-            deptos_db = sorted(df_dash['departamento'].dropna().unique().tolist())
-            filtro_depto = c_filtro2.selectbox("Filtro por Departamento:", ["Todos"] + deptos_db)
-            
-            df_filtrado = df_dash.copy()
-            if filtro_curso != "Todos":
-                df_filtrado = df_filtrado[df_filtrado['curso_evaluado'] == filtro_curso]
-            if filtro_depto != "Todos":
-                df_filtrado = df_filtrado[df_filtrado['departamento'] == filtro_depto]
-            
-            if not df_filtrado.empty:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Exámenes Vigentes (HC Activo)", len(df_filtrado))
+            # Sub-pestañas para organizar la vista gerencial y el overview operativo
+            dash_metricas, dash_calendario = st.tabs(["📈 Métricas Globales", "📅 Calendario de Reentrenamientos"])
+
+            # =================================================================
+            # VISTA 1: MÉTRICAS GLOBALES Y GRÁFICAS
+            # =================================================================
+            with dash_metricas:
+                c_filtro1, c_filtro2 = st.columns(2)
+                cursos_db = sorted(df_dash['curso_evaluado'].unique().tolist())
+                filtro_curso = c_filtro1.selectbox("Filtro por Curso:", ["Todos"] + cursos_db, key="dash_curso")
                 
-                promedio = df_filtrado['calificacion_total'].mean()
-                c2.metric("Promedio Global", f"{promedio:.2f} / 10.0")
+                deptos_db = sorted(df_dash['departamento'].dropna().unique().tolist())
+                filtro_depto = c_filtro2.selectbox("Filtro por Departamento:", ["Todos"] + deptos_db, key="dash_depto")
                 
-                aprobados = len(df_filtrado[df_filtrado['calificacion_total'] >= 8.0])
-                tasa_aprobacion = (aprobados / len(df_filtrado)) * 100 if len(df_filtrado) > 0 else 0
-                c3.metric("Tasa de Aprobación (≥ 8.0)", f"{tasa_aprobacion:.1f}%")
+                df_filtrado = df_dash.copy()
+                if filtro_curso != "Todos":
+                    df_filtrado = df_filtrado[df_filtrado['curso_evaluado'] == filtro_curso]
+                if filtro_depto != "Todos":
+                    df_filtrado = df_filtrado[df_filtrado['departamento'] == filtro_depto]
                 
-                st.divider()
-                
-                col_graf1, col_graf2 = st.columns(2)
-                
-                df_filtrado['Estatus'] = df_filtrado['calificacion_total'].apply(lambda x: 'Aprobado (≥ 8)' if x >= 8 else 'Reprobado (< 8)')
-                resumen_estatus = df_filtrado['Estatus'].value_counts().reset_index()
-                resumen_estatus.columns = ['Estatus', 'Cantidad']
-                
-                mapa_colores = {'Aprobado (≥ 8)': '#A29894', 'Reprobado (< 8)': '#D4002B'}
-                
-                fig_pie = px.pie(
-                    resumen_estatus, values='Cantidad', names='Estatus', 
-                    title="Distribución de Aprobación en Planta", color='Estatus', color_discrete_map=mapa_colores
-                )
-                col_graf1.plotly_chart(fig_pie, use_container_width=True)
-                
-                if filtro_depto == "Todos":
-                    resumen_deptos = df_filtrado.groupby('departamento').agg(
-                        Examenes=('num_empleado', 'count'), Promedio=('calificacion_total', 'mean')
-                    ).reset_index().sort_values('Examenes', ascending=False).head(10)
+                if not df_filtrado.empty:
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Exámenes Vigentes (HC Activo)", len(df_filtrado))
                     
-                    fig_bar = px.bar(
-                        resumen_deptos, x='Promedio', y='departamento', orientation='h', 
-                        title="Promedio por Departamento (Top 10 Volumen)", color_discrete_sequence=['#8D1537'], text_auto='.1f'
+                    promedio = df_filtrado['calificacion_total'].mean()
+                    c2.metric("Promedio Global", f"{promedio:.2f} / 10.0")
+                    
+                    aprobados = len(df_filtrado[df_filtrado['calificacion_total'] >= 8.0])
+                    tasa_aprobacion = (aprobados / len(df_filtrado)) * 100 if len(df_filtrado) > 0 else 0
+                    c3.metric("Tasa de Aprobación (≥ 8.0)", f"{tasa_aprobacion:.1f}%")
+                    
+                    st.divider()
+                    
+                    col_graf1, col_graf2 = st.columns(2)
+                    
+                    df_filtrado['Estatus'] = df_filtrado['calificacion_total'].apply(lambda x: 'Aprobado (≥ 8)' if x >= 8 else 'Reprobado (< 8)')
+                    resumen_estatus = df_filtrado['Estatus'].value_counts().reset_index()
+                    resumen_estatus.columns = ['Estatus', 'Cantidad']
+                    
+                    mapa_colores = {'Aprobado (≥ 8)': '#A29894', 'Reprobado (< 8)': '#D4002B'}
+                    
+                    fig_pie = px.pie(
+                        resumen_estatus, values='Cantidad', names='Estatus', 
+                        title="Distribución de Aprobación en Planta", color='Estatus', color_discrete_map=mapa_colores
                     )
-                    fig_bar.update_layout(yaxis={'categoryorder':'total ascending'}, plot_bgcolor='#F2F2F2', paper_bgcolor='#FFFFFF', font=dict(color='#000000'))
-                    col_graf2.plotly_chart(fig_bar, use_container_width=True)
-            else:
-                st.warning("No hay datos para los filtros seleccionados.")
+                    col_graf1.plotly_chart(fig_pie, use_container_width=True)
+                    
+                    if filtro_depto == "Todos":
+                        resumen_deptos = df_filtrado.groupby('departamento').agg(
+                            Examenes=('num_empleado', 'count'), Promedio=('calificacion_total', 'mean')
+                        ).reset_index().sort_values('Examenes', ascending=False).head(10)
+                        
+                        fig_bar = px.bar(
+                            resumen_deptos, x='Promedio', y='departamento', orientation='h', 
+                            title="Promedio por Departamento (Top 10 Volumen)", color_discrete_sequence=['#8D1537'], text_auto='.1f'
+                        )
+                        fig_bar.update_layout(yaxis={'categoryorder':'total ascending'}, plot_bgcolor='#F2F2F2', paper_bgcolor='#FFFFFF', font=dict(color='#000000'))
+                        col_graf2.plotly_chart(fig_bar, use_container_width=True)
+                else:
+                    st.warning("No hay datos para los filtros seleccionados.")
+
+            # =================================================================
+            # VISTA 2: CALENDARIO DE REENTRENAMIENTOS (OVERVIEW)
+            # =================================================================
+            with dash_calendario:
+                st.markdown("#### 📅 Overview de Necesidades Próximas")
+                st.write("Identifica al personal que requiere reentrenamiento. Excluye a quienes tienen certificaciones permanentes.")
+                
+                # 1. Obtener el último examen de cada empleado por curso (para saber su vigencia actual)
+                df_latest_cal = df_dash.sort_values('fecha_entrenamiento', ascending=False).drop_duplicates(subset=['num_empleado', 'curso_evaluado'], keep='first').copy()
+                
+                # 2. Extraer periodicidad matemática
+                def extraer_meses(detalle):
+                    if isinstance(detalle, dict) and 'periodicidad_meses' in detalle:
+                        return int(detalle['periodicidad_meses'])
+                    return 12 # Anual por defecto
+
+                df_latest_cal['meses_vigencia'] = df_latest_cal['detalle_respuestas'].apply(extraer_meses)
+                
+                # Filtramos a los que tienen periodicidad "0" (Permanentes), no necesitan estar en el calendario
+                df_calendario = df_latest_cal[df_latest_cal['meses_vigencia'] > 0].copy()
+                
+                if not df_calendario.empty:
+                    # Calcular fechas dinámicas
+                    df_calendario['Fecha de Vencimiento'] = df_calendario.apply(lambda row: (row['fecha_entrenamiento'] + relativedelta(months=row['meses_vigencia'])).date(), axis=1)
+                    df_calendario['Mes de Vencimiento'] = pd.to_datetime(df_calendario['Fecha de Vencimiento']).dt.to_period('M')
+                    
+                    # Selector dinámico de alcance temporal
+                    c_tiempo1, c_tiempo2 = st.columns(2)
+                    opciones_tiempo = {
+                        "Este Mes y Siguiente": 2, 
+                        "Próximos 3 Meses": 3, 
+                        "Próximos 6 Meses": 6, 
+                        "Ver Vencidos e Histórico Completo": 999
+                    }
+                    rango_seleccionado = c_tiempo1.selectbox("Rango de Proyección:", list(opciones_tiempo.keys()))
+                    filtro_curso_cal = c_tiempo2.selectbox("Filtrar Requerimiento por Curso:", ["Todos"] + sorted(df_calendario['curso_evaluado'].unique().tolist()))
+                    
+                    # Aplicar filtros
+                    if filtro_curso_cal != "Todos":
+                        df_calendario = df_calendario[df_calendario['curso_evaluado'] == filtro_curso_cal]
+                        
+                    hoy = datetime.now().date()
+                    if opciones_tiempo[rango_seleccionado] != 999:
+                        limite = hoy + relativedelta(months=opciones_tiempo[rango_seleccionado])
+                        # Mostrar vencidos (fecha < hoy) y los próximos en el rango seleccionado
+                        df_calendario = df_calendario[df_calendario['Fecha de Vencimiento'] <= limite]
+                        
+                    # Preparamos la tabla visual
+                    df_show_cal = df_calendario[['num_empleado', 'nombre_completo', 'departamento', 'curso_evaluado', 'Fecha de Vencimiento']].copy()
+                    df_show_cal.columns = ['ID Empleado', 'Nombre', 'Departamento', 'Curso Requerido', 'Fecha Límite']
+                    df_show_cal = df_show_cal.sort_values('Fecha Límite')
+                    
+                    # Semáforo de urgencia
+                    def estilar_urgencia(val):
+                        if isinstance(val, date):
+                            if val < hoy:
+                                return 'background-color: #ffcccc; color: #cc0000; font-weight: bold;' # Vencido
+                            elif val <= (hoy + timedelta(days=15)):
+                                return 'background-color: #f7aa67; color: black; font-weight: bold;' # Crítico (Naranja)
+                            elif val <= (hoy + timedelta(days=45)):
+                                return 'background-color: #fff2cc; color: #b38600;' # Próximo (Amarillo)
+                            else:
+                                return 'background-color: #e2f0d9; color: #385723;' # Óptimo (Verde)
+                        return ''
+
+                    st.dataframe(df_show_cal.style.map(estilar_urgencia, subset=['Fecha Límite']), use_container_width=True, hide_index=True)
+                    
+                    st.caption("🔴 Rojo: Vencido | 🟠 Naranja: Vence en ≤ 15 días | 🟡 Amarillo: Vence en ≤ 45 días | 🟢 Verde: Vigente")
+                else:
+                    st.info("Todo el personal activo cuenta con certificaciones permanentes. No hay reentrenamientos programados.")
+
         else:
             st.info("Ningún examen coincide con el padrón actual de empleados activos. Verifica que el headcount esté cargado.")
     else:
         st.info("Faltan datos. Asegúrate de haber cargado el Headcount y los históricos de entrenamiento.")
-
 
 # -----------------------------------------------------------------------------
 # PESTAÑA 2: GESTIÓN DE DATOS (Centralización de cargas)
