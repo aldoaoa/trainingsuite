@@ -5,6 +5,7 @@ from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 import plotly.express as px
 import time
+import streamlit.components.v1 as components
 
 # ==========================================
 # CONFIGURACIÓN DE PÁGINA Y CONEXIÓN
@@ -31,10 +32,11 @@ st.title("🎓 Sistema Global de Entrenamiento y Certificación")
 st.info("Administración centralizada de capacitaciones. Modula por curso, evalúa vigencias y detecta brechas de cumplimiento.")
 
 # --- CONSOLIDACIÓN DE PESTAÑAS ---
-tab_dash, tab_gestion_datos, tab_consulta, tab_auditoria = st.tabs([
+tab_dash, tab_gestion_datos, tab_consulta, tab_certificados, tab_auditoria = st.tabs([
     "📊 Dashboard Interactivo", 
     "⚙️ Gestión de Datos", 
-    "🔍 Consulta y Actualización", # <--- NUEVA PESTAÑA
+    "🔍 Consulta y Actualización",
+    "🎓 Emisión de Certificados", # <--- NUEVA PESTAÑA
     "🕵️ Auditoría de Brechas"
 ])
 
@@ -673,6 +675,192 @@ with tab_consulta:
                             except Exception as e:
                                 st.error(f"Error al guardar: {e}")
 
+# -----------------------------------------------------------------------------
+# PESTAÑA 4: EMISIÓN DE CERTIFICADOS EN PDF
+# -----------------------------------------------------------------------------
+with tab_certificados:
+    st.markdown("### 🎓 Emisión de Certificados Oficiales")
+    st.write("Busca a un empleado para visualizar sus cursos aprobados y generar el diploma en PDF.")
+
+    # 1. Buscador de empleados
+    try:
+        resp_emp_cert = supabase.table("empleados_planta").select("num_empleado, nombre_completo, estatus").execute()
+        df_emp_cert = pd.DataFrame(resp_emp_cert.data)
+    except:
+        df_emp_cert = pd.DataFrame()
+
+    if not df_emp_cert.empty:
+        df_emp_cert['display'] = df_emp_cert['num_empleado'] + " - " + df_emp_cert['nombre_completo']
+        lista_empleados_cert = [""] + df_emp_cert['display'].tolist()
+        
+        c_busqueda_cert, _ = st.columns([2, 1])
+        seleccion_cert = c_busqueda_cert.selectbox("Selecciona un empleado para emitir certificado:", lista_empleados_cert, key="sel_cert")
+
+        if seleccion_cert != "":
+            emp_id_cert = seleccion_cert.split(" - ")[0]
+            nombre_empleado_cert = seleccion_cert.split(" - ")[1]
+            
+            # 2. Obtener SOLO cursos aprobados (>= 8.0) del empleado
+            try:
+                resp_aprobados = supabase.table("entrenamientos_planta") \
+                    .select("curso_evaluado, fecha_entrenamiento, calificacion_total") \
+                    .eq("num_empleado", emp_id_cert) \
+                    .gte("calificacion_total", 8.0) \
+                    .order("fecha_entrenamiento", desc=True) \
+                    .execute()
+                df_aprobados = pd.DataFrame(resp_aprobados.data)
+            except:
+                df_aprobados = pd.DataFrame()
+                
+            st.divider()
+
+            if not df_aprobados.empty:
+                df_aprobados['fecha_dt'] = pd.to_datetime(df_aprobados['fecha_entrenamiento'])
+                
+                # Crear opciones descriptivas para el selector
+                opciones_cursos = []
+                for _, row in df_aprobados.iterrows():
+                    f_str = row['fecha_dt'].strftime('%d-%b-%Y')
+                    opciones_cursos.append(f"{row['curso_evaluado']} (Aprobado: {row['calificacion_total']} - Fecha: {f_str})")
+                
+                c_curso_cert, _ = st.columns([2, 1])
+                curso_elegido = c_curso_cert.selectbox("Selecciona el curso a certificar:", opciones_cursos)
+                
+                # Extraer datos exactos del curso seleccionado
+                idx_curso = opciones_cursos.index(curso_elegido)
+                datos_curso = df_aprobados.iloc[idx_curso]
+                
+                fecha_curso = datos_curso['fecha_dt']
+                meses_espanol = ["ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"]
+                
+                dia_cert = str(fecha_curso.day).zfill(2)
+                mes_cert = meses_espanol[fecha_curso.month - 1]
+                anio_cert = str(fecha_curso.year)
+                nombre_curso_cert = datos_curso['curso_evaluado']
+                
+                if st.button("🖼️ Generar Vista Previa del Certificado", type="primary"):
+                    
+                    # Cargar el HTML original, pero inyectando los datos de la base de datos de Python
+                    html_certificado = f"""
+                    <!DOCTYPE html>
+                    <html lang="es">
+                    <head>
+                        <meta charset="UTF-8">
+                        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                        <script src="https://cdn.tailwindcss.com"></script>
+                        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+                        <link href="https://fonts.googleapis.com/css2?family=Alex+Brush&family=Cinzel:wght@500;700&family=Dancing+Script:wght@600&family=Great+Vibes&family=Montserrat:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=Parisienne&family=Playfair+Display:ital,wght@0,600;0,700;1,400&display=swap" rel="stylesheet">
+                        <style>
+                            :root {{ --bcs-red: #9e0b0f; --bcs-dark-red: #610407; --bcs-gold: #d4af37; }}
+                            body {{ font-family: 'Montserrat', sans-serif; background-color: #0f172a; color: #f8fafc; overflow-x: hidden; margin: 0; padding: 0; }}
+                            .certificate-paper {{ width: 1000px; height: 707px; background-color: #ffffff; color: #1e293b; position: relative; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.4); overflow: hidden; box-sizing: border-box; }}
+                            [contenteditable="true"] {{ outline: none; transition: background-color 0.2s; border-radius: 4px; padding: 2px 6px; }}
+                            [contenteditable="true"]:hover {{ background-color: rgba(220, 38, 38, 0.05); box-shadow: 0 0 0 1px rgba(220, 38, 38, 0.2); }}
+                            .font-certificate-title {{ font-family: 'Cinzel', serif; letter-spacing: 0.15em; }}
+                            .font-name-script {{ font-family: 'Great Vibes', cursive; }}
+                            ::-webkit-scrollbar {{ width: 6px; }} ::-webkit-scrollbar-track {{ background: #1e293b; }} ::-webkit-scrollbar-thumb {{ background: #475569; border-radius: 3px; }}
+                            @media print {{
+                                @page {{ size: A4 landscape; margin: 0; }}
+                                body {{ background: white !important; padding: 0 !important; margin: 0 !important; }}
+                                .no-print {{ display: none !important; }}
+                                .certificate-paper {{ width: 100vw !important; height: 100vh !important; box-shadow: none !important; transform: scale(1) !important; }}
+                            }}
+                        </style>
+                    </head>
+                    <body class="flex flex-col lg:flex-row h-screen">
+                        <!-- Sidebar -->
+                        <aside class="no-print w-96 bg-slate-900 border-r border-slate-800 flex flex-col h-full z-20">
+                            <div class="p-4 border-b border-slate-800 bg-slate-950 flex justify-between items-center">
+                                <h1 class="font-bold text-white"><i class="fa-solid fa-award text-red-600 mr-2"></i>Editor BCS</h1>
+                            </div>
+                            <div class="p-4 space-y-4 overflow-y-auto flex-1 text-sm">
+                                <div>
+                                    <label class="block text-slate-300 mb-1 text-xs">Nombre</label>
+                                    <input type="text" id="inputName" value="{nombre_empleado_cert}" oninput="syncFromInput()" class="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white">
+                                </div>
+                                <div class="grid grid-cols-2 gap-2">
+                                    <div><label class="block text-slate-300 mb-1 text-xs">Día</label><input type="text" id="inputDay" value="{dia_cert}" oninput="syncFromInput()" class="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white text-center"></div>
+                                    <div><label class="block text-slate-300 mb-1 text-xs">Mes</label><input type="text" id="inputMonth" value="{mes_cert}" oninput="syncFromInput()" class="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white text-center"></div>
+                                </div>
+                                <div><label class="block text-slate-300 mb-1 text-xs">Año</label><input type="text" id="inputYear" value="{anio_cert}" oninput="syncFromInput()" class="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white text-center"></div>
+                                <div><label class="block text-slate-300 mb-1 text-xs">Curso</label><input type="text" id="inputCourse" value="{nombre_curso_cert}" oninput="syncFromInput()" class="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white"></div>
+                                <div><label class="block text-slate-300 mb-1 text-xs">Entrenador</label><input type="text" id="inputTrainer" value="NOMBRE DEL CAPACITADOR" oninput="syncFromInput()" class="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white"></div>
+                            </div>
+                            <div class="p-4 bg-slate-950">
+                                <button onclick="window.print()" class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg"><i class="fa-solid fa-print mr-2"></i>Imprimir / PDF</button>
+                            </div>
+                        </aside>
+
+                        <!-- Canvas -->
+                        <main class="flex-1 bg-slate-950 flex flex-col items-center justify-center p-8 overflow-hidden relative">
+                            <div class="no-print absolute top-4 right-4 space-x-2 z-50 text-white">
+                                <button onclick="zoom(0.9)" class="bg-slate-800 px-3 py-1 rounded">-</button>
+                                <button onclick="zoom(1.1)" class="bg-slate-800 px-3 py-1 rounded">+</button>
+                            </div>
+                            
+                            <div id="certificatePaper" class="certificate-paper rounded-lg relative flex flex-col justify-between p-12 transition-transform origin-center">
+                                <svg class="absolute inset-0 w-full h-full pointer-events-none z-0" viewBox="0 0 1000 707" fill="none">
+                                    <path d="M 620 0 C 720 120 850 180 1000 180 L 1000 0 Z" fill="#610407"/>
+                                    <path d="M 680 0 C 780 100 880 140 1000 140 L 1000 0 Z" fill="#9e0b0f"/>
+                                    <path d="M 650 0 C 760 110 880 155 1000 155" stroke="#d4af37" stroke-width="4" fill="none"/>
+                                    <path d="M 0 450 C 150 450 300 580 420 707 L 0 707 Z" fill="#610407"/>
+                                    <path d="M 0 490 C 120 490 250 600 360 707 L 0 707 Z" fill="#9e0b0f"/>
+                                    <path d="M 0 470 C 135 470 275 590 390 707" stroke="#d4af37" stroke-width="4" fill="none"/>
+                                    <path d="M -50 0 C 200 100 200 607 -50 707" stroke="#e0ca85" stroke-width="35" opacity="0.35" fill="none"/>
+                                </svg>
+                                
+                                <div class="relative z-10 h-full flex flex-col justify-between">
+                                    <div class="flex justify-between items-start pt-2 px-4">
+                                        <img src="https://raw.githubusercontent.com/aldoaoa/trainingsuite/refs/heads/main/logo.png" class="h-20 object-contain">
+                                    </div>
+                                    <div class="text-center px-12 -mt-4">
+                                        <h1 class="font-certificate-title text-5xl font-bold tracking-[0.25em] mb-3">CERTIFICADO</h1>
+                                        <p class="text-xs font-semibold tracking-[0.3em] mb-4">DE RECONOCIMIENTO A:</p>
+                                        <div class="my-3"><span id="certName" contenteditable="true" class="font-name-script text-[54px]">{nombre_empleado_cert}</span></div>
+                                        <div class="w-3/4 mx-auto border-b border-slate-300 my-3"></div>
+                                        <div class="text-sm max-w-2xl mx-auto my-4 space-y-2">
+                                            <p>Por completar el curso llamado “<span id="certCourse" contenteditable="true" class="font-bold">{nombre_curso_cert}</span>” en <span contenteditable="true" class="font-semibold">BCS-AIS Querétaro</span>.</p>
+                                            <p class="text-xs pt-2">Se expide el <span id="certDay" contenteditable="true" class="font-medium">{dia_cert}</span> de <span id="certMonth" contenteditable="true" class="font-medium">{mes_cert}</span> del año <span id="certYear" contenteditable="true" class="font-medium">{anio_cert}</span>.</p>
+                                        </div>
+                                    </div>
+                                    <div class="flex justify-between items-end pb-4 px-12">
+                                        <div class="w-1/4"></div>
+                                        <div class="text-center w-2/5">
+                                            <div class="w-full border-b border-slate-400 mb-2"></div>
+                                            <div id="certTrainer" contenteditable="true" class="text-sm font-bold tracking-wider">NOMBRE DEL CAPACITADOR</div>
+                                            <div contenteditable="true" class="text-[11px] font-semibold text-slate-600 mt-0.5">CAPACITADOR</div>
+                                        </div>
+                                        <div class="w-1/4 flex justify-end">
+                                            <div class="w-24 h-24 rounded-full bg-gradient-to-tr from-amber-600 to-amber-200 p-1 flex items-center justify-center"><div class="w-full h-full rounded-full border-2 border-dashed border-red-800 bg-yellow-100"></div></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </main>
+                        <script>
+                            let z = 0.8;
+                            function applyZ() {{ document.getElementById('certificatePaper').style.transform = `scale(${{z}})`; }}
+                            function zoom(f) {{ z *= f; applyZ(); }}
+                            function syncFromInput() {{
+                                document.getElementById('certName').innerText = document.getElementById('inputName').value;
+                                document.getElementById('certCourse').innerText = document.getElementById('inputCourse').value;
+                                document.getElementById('certDay').innerText = document.getElementById('inputDay').value;
+                                document.getElementById('certMonth').innerText = document.getElementById('inputMonth').value;
+                                document.getElementById('certYear').innerText = document.getElementById('inputYear').value;
+                                document.getElementById('certTrainer').innerText = document.getElementById('inputTrainer').value;
+                            }}
+                            window.onload = applyZ;
+                        </script>
+                    </body>
+                    </html>
+                    """ 
+                    
+                    # Renderizar el HTML en Streamlit con altura suficiente
+                    components.html(html_certificado, height=800, scrolling=True)
+
+            else:
+                st.warning("Este empleado no tiene cursos registrados con calificación aprobatoria (≥ 8.0).")
+                
 # -----------------------------------------------------------------------------
 # PESTAÑA 3: AUDITORÍA DE BRECHAS
 # -----------------------------------------------------------------------------
