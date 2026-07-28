@@ -511,15 +511,27 @@ with tab_consulta:
             
             st.divider()
             
-            # --- TARJETA DE IDENTIFICACIÓN ---
-            c_id1, c_id2, c_id3, c_id4 = st.columns(4)
+            # --- TARJETA DE IDENTIFICACIÓN (5 Columnas para incluir Fecha de Ingreso) ---
+            c_id1, c_id2, c_id3, c_id4, c_id5 = st.columns(5)
             c_id1.metric("Número de Empleado", emp_id)
             c_id2.metric("Nombre", datos_empleado['nombre_completo'])
-            c_id3.metric("Departamento", datos_empleado['departamento'])
+            
+            # Formatear fecha de ingreso para visualización limpia
+            f_ingreso = datos_empleado.get('fecha_ingreso', 'N/D')
+            if pd.notna(f_ingreso) and str(f_ingreso).strip() != '':
+                try:
+                    f_ingreso_fmt = pd.to_datetime(f_ingreso).strftime('%d-%b-%Y')
+                except:
+                    f_ingreso_fmt = str(f_ingreso)[:10]
+            else:
+                f_ingreso_fmt = "No registrada"
+                
+            c_id3.metric("Fecha de Ingreso", f_ingreso_fmt)
+            c_id4.metric("Departamento", datos_empleado.get('departamento', 'N/D'))
             
             # Etiqueta visual de estatus
             color_estatus = "🟢" if datos_empleado['estatus'] == 'Active' else "🔴"
-            c_id4.metric("Estatus", f"{color_estatus} {datos_empleado['estatus']}")
+            c_id5.metric("Estatus", f"{color_estatus} {datos_empleado['estatus']}")
 
             st.write("")
 
