@@ -698,7 +698,30 @@ with tab_certificados:
 
         if seleccion_cert != "":
             emp_id_cert = seleccion_cert.split(" - ")[0]
-            nombre_empleado_cert = seleccion_cert.split(" - ")[1]
+            nombre_crudo = seleccion_cert.split(" - ")[1]
+            
+            # --- NUEVA LÓGICA DE FORMATEO DE NOMBRE ---
+            def formatear_nombre_certificado(nombre):
+                partes = str(nombre).strip().split()
+                if len(partes) >= 3:
+                    # Los primeros 2 son los apellidos
+                    apellidos = partes[:2]
+                    # Del tercero en adelante son los nombres (pueden ser 1 o más)
+                    nombres = partes[2:]
+                    # Reordenamos: Nombre(s) + Apellidos
+                    reordenado = nombres + apellidos
+                    nombre_final = " ".join(reordenado)
+                elif len(partes) == 2:
+                    # Si solo tiene 2 palabras, asumimos 1 apellido y 1 nombre
+                    nombre_final = f"{partes[1]} {partes[0]}"
+                else:
+                    nombre_final = str(nombre)
+                
+                # .title() convierte "FRANCISCO JAVIER" a "Francisco Javier"
+                return nombre_final.title()
+                
+            nombre_empleado_cert = formatear_nombre_certificado(nombre_crudo)
+            # ------------------------------------------
             
             # 2. Obtener SOLO cursos aprobados (>= 8.0) del empleado
             try:
@@ -740,7 +763,7 @@ with tab_certificados:
                 
                 if st.button("🖼️ Generar Vista Previa del Certificado", type="primary"):
                     
-                    # Cargar el HTML original, pero inyectando los datos de la base de datos de Python
+                    # Cargar el HTML original, inyectando los datos formateados de Python
                     html_certificado = f"""
                     <!DOCTYPE html>
                     <html lang="es">
@@ -853,16 +876,14 @@ with tab_certificados:
                         </script>
                     </body>
                     </html>
-                    """ 
+                    """
                     
-                    # Renderizar el HTML en Streamlit con altura suficiente
+                    import streamlit.components.v1 as components
                     components.html(html_certificado, height=800, scrolling=True)
 
             else:
                 st.warning("Este empleado no tiene cursos registrados con calificación aprobatoria (≥ 8.0).")
-                
-# -----------------------------------------------------------------------------
-# PESTAÑA 3: AUDITORÍA DE BRECHAS
-# -----------------------------------------------------------------------------
+
+
 with tab_auditoria:
     st.info("El escaneo cronológico ahora requerirá agrupar por `num_empleado` y por `curso_evaluado` para buscar brechas de tiempo (gaps) independientemente en cada materia.")
