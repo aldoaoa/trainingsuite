@@ -682,6 +682,8 @@ with tab_certificados:
     st.markdown("### 🎓 Emisión de Certificados Oficiales")
     st.write("Busca a un empleado para visualizar sus cursos aprobados y generar el diploma en PDF.")
 
+    import re # Necesario para limpiar el nombre del curso en el folio
+
     # 1. Buscador de empleados
     try:
         resp_emp_cert = supabase.table("empleados_planta").select("num_empleado, nombre_completo, estatus").execute()
@@ -700,33 +702,26 @@ with tab_certificados:
             emp_id_cert = seleccion_cert.split(" - ")[0]
             nombre_crudo = seleccion_cert.split(" - ")[1]
             
-            # --- NUEVA LÓGICA DE FORMATEO DE NOMBRE ---
+            # Formateo de Nombre: Nombre(s) Apellido1 Apellido2
             def formatear_nombre_certificado(nombre):
                 partes = str(nombre).strip().split()
                 if len(partes) >= 3:
-                    # Los primeros 2 son los apellidos
                     apellidos = partes[:2]
-                    # Del tercero en adelante son los nombres (pueden ser 1 o más)
                     nombres = partes[2:]
-                    # Reordenamos: Nombre(s) + Apellidos
                     reordenado = nombres + apellidos
                     nombre_final = " ".join(reordenado)
                 elif len(partes) == 2:
-                    # Si solo tiene 2 palabras, asumimos 1 apellido y 1 nombre
                     nombre_final = f"{partes[1]} {partes[0]}"
                 else:
                     nombre_final = str(nombre)
-                
-                # .title() convierte "FRANCISCO JAVIER" a "Francisco Javier"
                 return nombre_final.title()
                 
             nombre_empleado_cert = formatear_nombre_certificado(nombre_crudo)
-            # ------------------------------------------
             
             # 2. Obtener SOLO cursos aprobados (>= 8.0) del empleado
             try:
                 resp_aprobados = supabase.table("entrenamientos_planta") \
-                    .select("curso_evaluado, fecha_entrenamiento, calificacion_total") \
+                    .select("id, curso_evaluado, fecha_entrenamiento, calificacion_total, detalle_respuestas") \
                     .eq("num_empleado", emp_id_cert) \
                     .gte("calificacion_total", 8.0) \
                     .order("fecha_entrenamiento", desc=True) \
@@ -761,9 +756,40 @@ with tab_certificados:
                 anio_cert = str(fecha_curso.year)
                 nombre_curso_cert = datos_curso['curso_evaluado']
                 
+                # --- GENERACIÓN DE FOLIO ---
+                # Verificar si ya tiene un folio manual guardado
+                detalle_json = datos_curso.get('detalle_respuestas', {})
+                folio_cert = ""
+                
+                if isinstance(detalle_json, dict) and 'num_certificado' in detalle_json and str(detalle_json['num_certificado']).strip():
+                    folio_cert = str(detalle_json['num_certificado']).strip()
+                else:
+                    # Limpiamos el nombre del curso (quitamos espacios y caracteres especiales)
+                    curso_limpio = re.sub(r'[^a-zA-Z0-9]', '', nombre_curso_cert).upper()
+                    
+                    # Consultamos cuántos certificados de ESTE curso, ESTE año, se han aprobado ANTES o IGUAL a esta fecha
+                    inicio_anio = f"{anio_cert}-01-01T00:00:00"
+                    fecha_limite = datos_curso['fecha_entrenamiento']
+                    try:
+                        resp_seq = supabase.table("entrenamientos_planta") \
+                            .select("id") \
+                            .eq("curso_evaluado", nombre_curso_cert) \
+                            .gte("fecha_entrenamiento", inicio_anio) \
+                            .lte("fecha_entrenamiento", fecha_limite) \
+                            .gte("calificacion_total", 8.0) \
+                            .execute()
+                        # El consecutivo es la cantidad de registros encontrados
+                        consecutivo = len(resp_seq.data)
+                    except:
+                        consecutivo = 1
+                        
+                    consecutivo_str = str(consecutivo).zfill(4)
+                    folio_cert = f"BCSQRO-{curso_limpio}-{anio_cert}-{consecutivo_str}"
+                # ---------------------------
+                
                 if st.button("🖼️ Generar Vista Previa del Certificado", type="primary"):
                     
-                    # Cargar el HTML original, inyectando los datos formateados de Python
+                    # HTML original inyectando datos y el Folio en la parte inferior izquierda
                     html_certificado = f"""
                     <!DOCTYPE html>
                     <html lang="es">
@@ -808,6 +834,7 @@ with tab_certificados:
                                 <div><label class="block text-slate-300 mb-1 text-xs">Año</label><input type="text" id="inputYear" value="{anio_cert}" oninput="syncFromInput()" class="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white text-center"></div>
                                 <div><label class="block text-slate-300 mb-1 text-xs">Curso</label><input type="text" id="inputCourse" value="{nombre_curso_cert}" oninput="syncFromInput()" class="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white"></div>
                                 <div><label class="block text-slate-300 mb-1 text-xs">Entrenador</label><input type="text" id="inputTrainer" value="NOMBRE DEL CAPACITADOR" oninput="syncFromInput()" class="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white"></div>
+                                <div><label class="block text-slate-300 mb-1 text-xs">Folio (Opcional)</label><input type="text" id="inputFolio" value="{folio_cert}" oninput="syncFromInput()" class="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white"></div>
                             </div>
                             <div class="p-4 bg-slate-950">
                                 <button onclick="window.print()" class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg"><i class="fa-solid fa-print mr-2"></i>Imprimir / PDF</button>
@@ -846,11 +873,18 @@ with tab_certificados:
                                             <p class="text-xs pt-2">Se expide el <span id="certDay" contenteditable="true" class="font-medium">{dia_cert}</span> de <span id="certMonth" contenteditable="true" class="font-medium">{mes_cert}</span> del año <span id="certYear" contenteditable="true" class="font-medium">{anio_cert}</span>.</p>
                                         </div>
                                     </div>
-                                    <div class="flex justify-between items-end pb-4 px-12">
-                                        <div class="w-1/4"></div>
+                                    
+                                    <div class="flex justify-between items-end pb-4 px-12 relative">
+                                        <!-- SECCIÓN DEL FOLIO EN LA ESQUINA INFERIOR IZQUIERDA -->
+                                        <div class="w-1/4 pb-4">
+                                            <div class="text-[10px] text-slate-500 font-mono tracking-widest uppercase">
+                                                FOLIO: <span id="certFolio" contenteditable="true" class="font-semibold">{folio_cert}</span>
+                                            </div>
+                                        </div>
+                                        
                                         <div class="text-center w-2/5">
                                             <div class="w-full border-b border-slate-400 mb-2"></div>
-                                            <div id="certTrainer" contenteditable="true" class="text-sm font-bold tracking-wider">NOMBRE DEL CAPACITADOR</div>
+                                            <div id="certTrainer" contenteditable="true" class="text-sm font-bold tracking-wider uppercase">NOMBRE DEL CAPACITADOR</div>
                                             <div contenteditable="true" class="text-[11px] font-semibold text-slate-600 mt-0.5">CAPACITADOR</div>
                                         </div>
                                         <div class="w-1/4 flex justify-end">
@@ -871,6 +905,7 @@ with tab_certificados:
                                 document.getElementById('certMonth').innerText = document.getElementById('inputMonth').value;
                                 document.getElementById('certYear').innerText = document.getElementById('inputYear').value;
                                 document.getElementById('certTrainer').innerText = document.getElementById('inputTrainer').value;
+                                document.getElementById('certFolio').innerText = document.getElementById('inputFolio').value;
                             }}
                             window.onload = applyZ;
                         </script>
@@ -883,7 +918,6 @@ with tab_certificados:
 
             else:
                 st.warning("Este empleado no tiene cursos registrados con calificación aprobatoria (≥ 8.0).")
-
 
 with tab_auditoria:
     st.info("El escaneo cronológico ahora requerirá agrupar por `num_empleado` y por `curso_evaluado` para buscar brechas de tiempo (gaps) independientemente en cada materia.")
