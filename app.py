@@ -30,9 +30,11 @@ except Exception as e:
 st.title("🎓 Sistema Global de Entrenamiento y Certificación")
 st.info("Administración centralizada de capacitaciones. Modula por curso, evalúa vigencias y detecta brechas de cumplimiento.")
 
-tab_dash, tab_semanal, tab_historico, tab_auditoria = st.tabs([
+# Agrega esta pestaña a tu configuración inicial
+tab_dash, tab_semanal, tab_hc, tab_historico, tab_auditoria = st.tabs([
     "📊 Dashboard Interactivo", 
     "🔄 Actualización Semanal (Forms)", 
+    "👥 Sincronización de Headcount", # <--- NUEVA PESTAÑA
     "📥 Carga Masiva (Histórico)", 
     "🕵️ Auditoría de Brechas"
 ])
@@ -221,7 +223,95 @@ with tab_dash:
         
     else:
         st.info("La base de datos está vacía. Inicia cargando archivos en la pestaña de Actualización.")
+# -----------------------------------------------------------------------------
+# PESTAÑA: GESTIÓN DE HEADCOUNT (ALTAS Y BAJAS AUTOMÁTICAS)
+# -----------------------------------------------------------------------------
+with tab_hc:
+    st.markdown("#### 👥 Sincronización del Headcount Maestro")
+    st.write("Sube el reporte de RH (ej. HC_Snapshot). El sistema actualizará datos, registrará altas y dará de baja por descarte a quienes ya no figuren.")
 
+    archivo_hc = st.file_uploader("Subir reporte semanal de Headcount", type=["xlsx", "xls"], key="up_hc")
+
+    if archivo_hc:
+        with st.spinner("Leyendo la pestaña 'HC_Snapshot' del archivo..."):
+            try:
+                # El sistema debe apuntar directamente a la hoja donde están los datos
+                df_hc = pd.read_excel(archivo_hc, sheet_name='HC_Snapshot')
+                
+                col_id = 'Pers.No.'
+                
+                # Estandarización de IDs
+                df_hc[col_id] = df_hc[col_id].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                df_hc = df_hc[(df_hc[col_id] != 'nan') & (df_hc[col_id] != '') & (df_hc[col_id].notna())]
+                
+                st.success(f"✅ Se leyeron {len(df_hc)} empleados vigentes en el archivo.")
+
+                if st.button("🔄 Procesar Altas, Bajas y Actualizaciones", type="primary"):
+                    with st.spinner("Cruzando datos con la base actual..."):
+                        
+                        # 1. Traer a todos los empleados de Supabase
+                        try:
+                            resp_db = supabase.table("empleados_planta").select("num_empleado, estatus").execute()
+                            empleados_db = {str(x['num_empleado']): x['estatus'] for x in resp_db.data}
+                        except Exception as e:
+                            empleados_db = {}
+                        
+                        # 2. Identificar BAJAS por ausencia
+                        ids_excel = set(df_hc[col_id].tolist())
+                        ids_db = set(empleados_db.keys())
+                        
+                        bajas_detectadas = ids_db - ids_excel
+                        # Solo procesamos la baja si no estaba ya como inactivo
+                        bajas_a_procesar = [emp for emp in bajas_detectadas if empleados_db[emp] != 'Inactive']
+                        
+                        # 3. Preparar el bloque de UPSERT (Altas y actualizaciones de puesto/área)
+                        lote_upsert = []
+                        for _, row in df_hc.iterrows():
+                            emp_id = row[col_id]
+                            
+                            # Limpiar fecha de ingreso
+                            fecha_raw = row.get('Join Date')
+                            try:
+                                fecha_ingreso = pd.to_datetime(fecha_raw).strftime('%Y-%m-%d')
+                            except:
+                                fecha_ingreso = None
+                                
+                            # Absorber todas las columnas del Excel en formato crudo para el JSON
+                            datos_json = row.fillna("").to_dict()
+                            
+                            estatus_reportado = str(row.get('Employment Status', 'Active')).strip()
+                            
+                            lote_upsert.append({
+                                "num_empleado": emp_id,
+                                "nombre_completo": str(row.get('Personnel Name', 'N/D')).strip(),
+                                "estatus": estatus_reportado,
+                                "fecha_ingreso": fecha_ingreso,
+                                "puesto": str(row.get('Job Title', 'N/D')).strip(),
+                                "departamento": str(row.get('Depto Eng', row.get('Cost Center', 'N/D'))).strip(),
+                                "area": str(row.get('Area', 'N/D')).strip(),
+                                "supervisor": str(row.get('Direct_Supervisor', row.get('Manager', 'N/D'))).strip(),
+                                "clase_categoria": str(row.get('ClassCateg', 'N/D')).strip(),
+                                "datos_completos": datos_json,
+                                "ultima_actualizacion": datetime.now().isoformat()
+                            })
+                        
+                        # 4. Impactar Base de Datos
+                        
+                        # A) Ejecutar Bajas
+                        if bajas_a_procesar:
+                            # Iteramos porque Supabase Python client no soporta un "update in list" nativo rápido
+                            for emp in bajas_a_procesar:
+                                supabase.table("empleados_planta").update({"estatus": "Inactive", "ultima_actualizacion": datetime.now().isoformat()}).eq("num_empleado", emp).execute()
+                                
+                        # B) Ejecutar Upserts (Altas/Cambios)
+                        if lote_upsert:
+                            for i in range(0, len(lote_upsert), 300):
+                                supabase.table("empleados_planta").upsert(lote_upsert[i:i+300]).execute()
+                                
+                        st.success(f"✅ **¡Padrón maestro actualizado exitosamente!**\n\n- **Personal procesado (Altas/Cambios):** {len(lote_upsert)}\n- **Bajas Automáticas procesadas:** {len(bajas_a_procesar)}")
+                        
+            except Exception as e:
+                st.error(f"Error procesando el archivo: {e}")
 # -----------------------------------------------------------------------------
 # PESTAÑA 3 & 4 (Estructura base para expansión)
 # -----------------------------------------------------------------------------
