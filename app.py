@@ -194,35 +194,114 @@ with tab_semanal:
 # -----------------------------------------------------------------------------
 # PESTAÑA 2: DASHBOARD INTERACTIVO
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# PESTAÑA: DASHBOARD INTERACTIVO (Filtro estricto a personal ACTIVO)
+# -----------------------------------------------------------------------------
 with tab_dash:
-    st.markdown("#### 📊 Análisis de Calificaciones por Curso")
+    st.markdown("#### 📊 Dashboard de Certificación y Cumplimiento")
+    st.write("Las métricas presentadas aquí están cruzadas con el Headcount actual. **Excluyen automáticamente** las evaluaciones del personal dado de baja.")
     
-    try:
-        # Cargar todos los registros para métricas globales
-        resp_train = supabase.table("entrenamientos_planta").select("num_empleado, fecha_entrenamiento, calificacion_total, curso_evaluado").execute()
-        df_todo = pd.DataFrame(resp_train.data)
-    except:
-        df_todo = pd.DataFrame()
-
-    if not df_todo.empty:
-        cursos_db = df_todo['curso_evaluado'].unique().tolist()
-        filtro_curso = st.selectbox("Filtrar métricas por curso:", ["Todos"] + cursos_db)
-        
-        if filtro_curso != "Todos":
-            df_dash = df_todo[df_todo['curso_evaluado'] == filtro_curso]
-        else:
-            df_dash = df_todo
+    with st.spinner("Sincronizando padrón y evaluaciones..."):
+        try:
+            # 1. Traer SOLO personal con estatus 'Active' de la tabla maestra
+            resp_emp = supabase.table("empleados_planta").select("num_empleado, nombre_completo, departamento, area").eq("estatus", "Active").execute()
+            df_activos = pd.DataFrame(resp_emp.data)
             
-        df_dash['fecha_entrenamiento'] = pd.to_datetime(df_dash['fecha_entrenamiento'])
+            # 2. Traer TODO el historial de entrenamientos
+            resp_train = supabase.table("entrenamientos_planta").select("num_empleado, fecha_entrenamiento, calificacion_total, curso_evaluado").execute()
+            df_train = pd.DataFrame(resp_train.data)
+            
+        except Exception as e:
+            df_activos = pd.DataFrame()
+            df_train = pd.DataFrame()
+            st.error(f"Error al conectar con la base de datos: {e}")
+
+    if not df_activos.empty and not df_train.empty:
+        # 3. EL CROSS CHECK (INNER JOIN): Descarta a cualquiera que no esté en df_activos
+        df_dash = pd.merge(df_train, df_activos, on="num_empleado", how="inner")
         
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Exámenes Totales", len(df_dash))
-        c2.metric("Promedio Global", f"{df_dash['calificacion_total'].mean():.2f} / 10")
-        aprobados = len(df_dash[df_dash['calificacion_total'] >= 8.0])
-        c3.metric("Tasa de Aprobación", f"{(aprobados/len(df_dash))*100:.1f}%")
-        
+        if not df_dash.empty:
+            df_dash['fecha_entrenamiento'] = pd.to_datetime(df_dash['fecha_entrenamiento'])
+            
+            # --- FILTROS DE INTERFAZ ---
+            c_filtro1, c_filtro2 = st.columns(2)
+            cursos_db = sorted(df_dash['curso_evaluado'].unique().tolist())
+            filtro_curso = c_filtro1.selectbox("Filtro por Curso:", ["Todos"] + cursos_db)
+            
+            deptos_db = sorted(df_dash['departamento'].dropna().unique().tolist())
+            filtro_depto = c_filtro2.selectbox("Filtro por Departamento:", ["Todos"] + deptos_db)
+            
+            # Aplicar filtros
+            df_filtrado = df_dash.copy()
+            if filtro_curso != "Todos":
+                df_filtrado = df_filtrado[df_filtrado['curso_evaluado'] == filtro_curso]
+            if filtro_depto != "Todos":
+                df_filtrado = df_filtrado[df_filtrado['departamento'] == filtro_depto]
+            
+            if not df_filtrado.empty:
+                # --- KPI CARDS ---
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Exámenes Vigentes (HC Activo)", len(df_filtrado))
+                
+                promedio = df_filtrado['calificacion_total'].mean()
+                c2.metric("Promedio Global", f"{promedio:.2f} / 10.0")
+                
+                aprobados = len(df_filtrado[df_filtrado['calificacion_total'] >= 8.0])
+                tasa_aprobacion = (aprobados / len(df_filtrado)) * 100 if len(df_filtrado) > 0 else 0
+                c3.metric("Tasa de Aprobación (≥ 8.0)", f"{tasa_aprobacion:.1f}%")
+                
+                st.divider()
+                
+                # --- GRÁFICAS CON TU ESQUEMA DE COLORES ---
+                col_graf1, col_graf2 = st.columns(2)
+                
+                # Gráfica 1: Distribución de Aprobación
+                df_filtrado['Estatus'] = df_filtrado['calificacion_total'].apply(lambda x: 'Aprobado (≥ 8)' if x >= 8 else 'Reprobado (< 8)')
+                resumen_estatus = df_filtrado['Estatus'].value_counts().reset_index()
+                resumen_estatus.columns = ['Estatus', 'Cantidad']
+                
+                # Colores corporativos: Gris cálido para aprobados, Rojo corporativo para reprobados
+                mapa_colores = {'Aprobado (≥ 8)': '#A29894', 'Reprobado (< 8)': '#D4002B'}
+                
+                fig_pie = px.pie(
+                    resumen_estatus, 
+                    values='Cantidad', 
+                    names='Estatus', 
+                    title="Distribución de Aprobación en Planta", 
+                    color='Estatus', 
+                    color_discrete_map=mapa_colores
+                )
+                col_graf1.plotly_chart(fig_pie, use_container_width=True)
+                
+                # Gráfica 2: Desempeño por Departamento
+                if filtro_depto == "Todos":
+                    resumen_deptos = df_filtrado.groupby('departamento').agg(
+                        Examenes=('num_empleado', 'count'),
+                        Promedio=('calificacion_total', 'mean')
+                    ).reset_index().sort_values('Examenes', ascending=False).head(10)
+                    
+                    fig_bar = px.bar(
+                        resumen_deptos, 
+                        x='Promedio', 
+                        y='departamento', 
+                        orientation='h', 
+                        title="Promedio por Departamento (Top 10 Volumen)", 
+                        color_discrete_sequence=['#8D1537'], # Rojo Oscuro corporativo
+                        text_auto='.1f'
+                    )
+                    fig_bar.update_layout(
+                        yaxis={'categoryorder':'total ascending'},
+                        plot_bgcolor='#F2F2F2',
+                        paper_bgcolor='#FFFFFF',
+                        font=dict(color='#000000')
+                    )
+                    col_graf2.plotly_chart(fig_bar, use_container_width=True)
+            else:
+                st.warning("No hay datos para los filtros seleccionados.")
+        else:
+            st.info("Ningún examen coincide con el padrón actual de empleados activos. Verifica que el headcount esté cargado.")
     else:
-        st.info("La base de datos está vacía. Inicia cargando archivos en la pestaña de Actualización.")
+        st.info("Faltan datos. Asegúrate de haber cargado el Headcount en su pestaña correspondiente y los históricos de entrenamiento.")
 # -----------------------------------------------------------------------------
 # PESTAÑA: GESTIÓN DE HEADCOUNT (ALTAS Y BAJAS AUTOMÁTICAS)
 # -----------------------------------------------------------------------------
