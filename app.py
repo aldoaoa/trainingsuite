@@ -31,9 +31,10 @@ st.title("🎓 Sistema Global de Entrenamiento y Certificación")
 st.info("Administración centralizada de capacitaciones. Modula por curso, evalúa vigencias y detecta brechas de cumplimiento.")
 
 # --- CONSOLIDACIÓN DE PESTAÑAS ---
-tab_dash, tab_gestion_datos, tab_auditoria = st.tabs([
+tab_dash, tab_gestion_datos, tab_consulta, tab_auditoria = st.tabs([
     "📊 Dashboard Interactivo", 
     "⚙️ Gestión de Datos", 
+    "🔍 Consulta y Actualización", # <--- NUEVA PESTAÑA
     "🕵️ Auditoría de Brechas"
 ])
 
@@ -399,6 +400,160 @@ with tab_gestion_datos:
                 if err_archivos:
                     st.error("⚠️ Archivos ignorados por errores:")
                     for err in err_archivos: st.write(f"- {err}")
+
+# -----------------------------------------------------------------------------
+# PESTAÑA 3: CONSULTA DE PERSONAL Y ACTUALIZACIÓN MANUAL
+# -----------------------------------------------------------------------------
+with tab_consulta:
+    st.markdown("### 🔍 Expediente Individual y Actualización")
+    st.write("Busca el historial de capacitación de cualquier empleado (Activo o Baja) y registra evaluaciones de forma manual.")
+
+    # 1. Cargar padrón para el buscador
+    try:
+        resp_emp = supabase.table("empleados_planta").select("num_empleado, nombre_completo, estatus, puesto, departamento").execute()
+        df_emp = pd.DataFrame(resp_emp.data)
+    except Exception as e:
+        df_emp = pd.DataFrame()
+        st.error(f"Error cargando el padrón: {e}")
+
+    if not df_emp.empty:
+        # Formatear lista para el buscador interactivo
+        df_emp['display'] = df_emp['num_empleado'] + " - " + df_emp['nombre_completo'] + " [" + df_emp['estatus'] + "]"
+        lista_empleados = [""] + df_emp['display'].tolist()
+        
+        col_busqueda, _ = st.columns([2, 1])
+        seleccion = col_busqueda.selectbox("Buscador de Empleados (Escribe ID o Nombre):", lista_empleados)
+
+        if seleccion != "":
+            emp_id = seleccion.split(" - ")[0]
+            datos_empleado = df_emp[df_emp['num_empleado'] == emp_id].iloc[0]
+            
+            st.divider()
+            
+            # --- TARJETA DE IDENTIFICACIÓN ---
+            c_id1, c_id2, c_id3, c_id4 = st.columns(4)
+            c_id1.metric("Número de Empleado", emp_id)
+            c_id2.metric("Nombre", datos_empleado['nombre_completo'])
+            c_id3.metric("Departamento", datos_empleado['departamento'])
+            
+            # Etiqueta visual de estatus
+            color_estatus = "🟢" if datos_empleado['estatus'] == 'Active' else "🔴"
+            c_id4.metric("Estatus", f"{color_estatus} {datos_empleado['estatus']}")
+
+            st.write("")
+
+            # 2. Cargar historial del empleado seleccionado
+            try:
+                resp_historial = supabase.table("entrenamientos_planta").select("*").eq("num_empleado", emp_id).order("fecha_entrenamiento", desc=True).execute()
+                df_hist = pd.DataFrame(resp_historial.data)
+            except:
+                df_hist = pd.DataFrame()
+
+            # --- PANEL DIVIDIDO: HISTORIAL VS REGISTRO MANUAL ---
+            col_historial, col_registro = st.columns([2, 1], gap="large")
+
+            with col_historial:
+                st.markdown("#### 📜 Matriz de Entrenamientos")
+                
+                if not df_hist.empty:
+                    df_hist['fecha_entrenamiento'] = pd.to_datetime(df_hist['fecha_entrenamiento'])
+                    
+                    # Identificar la última evaluación por cada curso para el cálculo de vigencia
+                    df_latest = df_hist.sort_values('fecha_entrenamiento', ascending=False).drop_duplicates(subset=['curso_evaluado'], keep='first').copy()
+                    
+                    # Cálculo dinámico de próxima fecha basado en el JSONB o asumiendo 12 meses
+                    def calcular_proximo(row):
+                        detalle = row.get('detalle_respuestas', {})
+                        meses = 12 # Anual por defecto
+                        if isinstance(detalle, dict) and 'periodicidad_meses' in detalle:
+                            meses = int(detalle['periodicidad_meses'])
+                        
+                        return (row['fecha_entrenamiento'] + relativedelta(months=meses)).date()
+                    
+                    def obtener_periodicidad(row):
+                        detalle = row.get('detalle_respuestas', {})
+                        if isinstance(detalle, dict) and 'periodicidad_meses' in detalle:
+                            return f"{detalle['periodicidad_meses']} meses"
+                        return "12 meses"
+
+                    df_latest['Próximo Vencimiento'] = df_latest.apply(calcular_proximo, axis=1)
+                    df_latest['Periodicidad'] = df_latest.apply(obtener_periodicidad, axis=1)
+                    df_latest['Fecha de Curso'] = df_latest['fecha_entrenamiento'].dt.date
+                    
+                    # Formato para visualización
+                    df_mostrar = df_latest[['curso_evaluado', 'Fecha de Curso', 'Periodicidad', 'Próximo Vencimiento', 'calificacion_total', 'archivo_origen']].copy()
+                    df_mostrar.columns = ['Curso', 'Última Fecha', 'Periodicidad', 'Próximo Vencimiento', 'Calificación', 'Origen']
+                    
+                    # Semáforo de vigencias (Vencido = Rojo, Vigente = Verde)
+                    hoy = datetime.now().date()
+                    def estilo_vigencia(val):
+                        if isinstance(val, date):
+                            if val < hoy:
+                                return 'background-color: #ffcccc; color: #cc0000; font-weight: bold;'
+                            elif val <= (hoy + timedelta(days=30)):
+                                return 'background-color: #fff2cc; color: #b38600; font-weight: bold;'
+                            else:
+                                return 'background-color: #e2f0d9; color: #385723;'
+                        return ''
+
+                    st.dataframe(df_mostrar.style.map(estilo_vigencia, subset=['Próximo Vencimiento']), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Este colaborador no tiene entrenamientos registrados en el sistema.")
+
+            with col_registro:
+                st.markdown("#### ➕ Registrar Certificación Manual")
+                with st.form("form_nuevo_curso"):
+                    # Extraer cursos existentes para autocompletar, o permitir escribir uno nuevo
+                    try:
+                        resp_cursos = supabase.table("entrenamientos_planta").select("curso_evaluado").execute()
+                        cursos_unicos = sorted(list(set([x['curso_evaluado'] for x in resp_cursos.data])))
+                    except:
+                        cursos_unicos = []
+                        
+                    n_curso = st.selectbox("Selecciona o escribe el curso:", cursos_unicos + ["-- OTRO (Escribir abajo) --"])
+                    n_curso_manual = st.text_input("Nombre del Curso (Si elegiste 'OTRO'):")
+                    
+                    n_fecha = st.date_input("Fecha de Certificación:", datetime.now().date())
+                    n_calificacion = st.number_input("Calificación Obtenida (0-10):", min_value=0.0, max_value=10.0, value=10.0, step=0.1)
+                    
+                    n_periodicidad = st.selectbox("Periodicidad de Reentrenamiento:", [
+                        (12, "Anual (12 meses)"), 
+                        (6, "Semestral (6 meses)"), 
+                        (24, "Bianual (24 meses)"),
+                        (0, "Única vez (Sin caducidad)")
+                    ], format_func=lambda x: x[1])
+
+                    submit_manual = st.form_submit_button("💾 Guardar Registro", type="primary", use_container_width=True)
+
+                    if submit_manual:
+                        curso_final = n_curso_manual.strip() if n_curso == "-- OTRO (Escribir abajo) --" else n_curso.strip()
+                        
+                        if not curso_final:
+                            st.error("Debes especificar el nombre del curso.")
+                        else:
+                            # Inyectamos la periodicidad en el JSON de detalle
+                            json_manual = {
+                                "tipo_ingreso": "Registro Manual HR",
+                                "periodicidad_meses": n_periodicidad[0]
+                            }
+                            
+                            payload = {
+                                "num_empleado": emp_id,
+                                "nombre_empleado": datos_empleado['nombre_completo'],
+                                "curso_evaluado": curso_final,
+                                "fecha_entrenamiento": n_fecha.isoformat() + "T12:00:00",
+                                "calificacion_total": float(n_calificacion),
+                                "detalle_respuestas": json_manual,
+                                "archivo_origen": "REGISTRO MANUAL"
+                            }
+                            
+                            try:
+                                supabase.table("entrenamientos_planta").insert(payload).execute()
+                                st.success("✅ Registro guardado correctamente.")
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error al guardar: {e}")
 
 # -----------------------------------------------------------------------------
 # PESTAÑA 3: AUDITORÍA DE BRECHAS
