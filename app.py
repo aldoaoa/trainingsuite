@@ -121,62 +121,62 @@ with tab_semanal:
                             
                             # --- NUEVA LÓGICA DE EXTRACCIÓN DE PUNTAJES ---
                                 
-                                # Palabras clave para detectar preguntas de retroalimentación que NO se evalúan
-                                palabras_filtro = [
-                                    'nombre', 'puesto', 'empleado', 'fecha', 'exámen', 'examen', 
-                                    'instructor', 'demostró dominio', 'explicó los temas', 
-                                    'resolvió adecuadamente', 'manejó bien el tiempo', 
-                                    'contenido del curso fue útil', 'podría mejorar', 
-                                    'lee a continuación y califica'
-                                ]
+                            # Palabras clave para detectar preguntas de retroalimentación que NO se evalúan
+                            palabras_filtro = [
+                                'nombre', 'puesto', 'empleado', 'fecha', 'exámen', 'examen', 
+                                'instructor', 'demostró dominio', 'explicó los temas', 
+                                'resolvió adecuadamente', 'manejó bien el tiempo', 
+                                'contenido del curso fue útil', 'podría mejorar', 
+                                'lee a continuación y califica'
+                            ]
 
-                                detalle = {}
+                            detalle = {}
+                            
+                            # Iteramos sobre todas las columnas de "Puntos:"
+                            for cp in cols_preguntas:
+                                # Extraer el texto exacto de la pregunta eliminando el prefijo "Puntos: "
+                                col_respuesta_texto = cp.replace("Puntos: ", "", 1).strip()
                                 
-                                # Iteramos sobre todas las columnas de "Puntos:"
-                                for cp in cols_preguntas:
-                                    # Extraer el texto exacto de la pregunta eliminando el prefijo "Puntos: "
-                                    col_respuesta_texto = cp.replace("Puntos: ", "", 1).strip()
-                                    
-                                    # 1. IGNORAR PREGUNTAS DE RETROALIMENTACIÓN
-                                    # Si la pregunta contiene alguna frase de nuestro filtro, la ignoramos.
-                                    if any(x in col_respuesta_texto.lower() for x in palabras_filtro):
-                                        continue 
-                                    
-                                    # 2. VALIDAR SI EL USUARIO CONTESTÓ LA PREGUNTA
-                                    if col_respuesta_texto in df_raw.columns:
-                                        respuesta = row.get(col_respuesta_texto)
-                                        # Solo tomamos en cuenta la pregunta si hay texto/respuesta válida
-                                        if pd.notna(respuesta) and str(respuesta).strip() != '':
+                                # 1. IGNORAR PREGUNTAS DE RETROALIMENTACIÓN
+                                # Si la pregunta contiene alguna frase de nuestro filtro, la ignoramos.
+                                if any(x in col_respuesta_texto.lower() for x in palabras_filtro):
+                                    continue 
+                                
+                                # 2. VALIDAR SI EL USUARIO CONTESTÓ LA PREGUNTA
+                                if col_respuesta_texto in df_raw.columns:
+                                    respuesta = row.get(col_respuesta_texto)
+                                    # Solo tomamos en cuenta la pregunta si hay texto/respuesta válida
+                                    if pd.notna(respuesta) and str(respuesta).strip() != '':
+                                        
+                                        # Extraer los puntos obtenidos
+                                        val_raw = row.get(cp, 0)
+                                        try:
+                                            puntos = 0.0 if pd.isna(float(val_raw)) else float(val_raw)
+                                        except:
+                                            puntos = 0.0
                                             
-                                            # Extraer los puntos obtenidos
-                                            val_raw = row.get(cp, 0)
-                                            try:
-                                                puntos = 0.0 if pd.isna(float(val_raw)) else float(val_raw)
-                                            except:
-                                                puntos = 0.0
-                                                
-                                            detalle[cp] = puntos
-                                
-                                # 3. CÁLCULO DE CALIFICACIÓN (Solo sobre lo contestado)
-                                total_reactivos = len(detalle)
-                                if total_reactivos > 0:
-                                    # Contamos cuántas respuestas correctas (puntos > 0) tiene en el diccionario
-                                    aciertos = sum([1.0 for v in detalle.values() if float(v) > 0])
-                                    calif_total = round((aciertos / total_reactivos) * 10.0, 2)
-                                else:
-                                    calif_total = 0.0
-                                # --- FIN NUEVA LÓGICA ---
-                                # --- HASTA AQUÍ ---
+                                        detalle[cp] = puntos
+                            
+                            # 3. CÁLCULO DE CALIFICACIÓN (Solo sobre lo contestado)
+                            total_reactivos = len(detalle)
+                            if total_reactivos > 0:
+                                # Contamos cuántas respuestas correctas (puntos > 0) tiene en el diccionario
+                                aciertos = sum([1.0 for v in detalle.values() if float(v) > 0])
+                                calif_total = round((aciertos / total_reactivos) * 10.0, 2)
+                            else:
+                                calif_total = 0.0
+                            # --- FIN NUEVA LÓGICA ---
+                            # --- HASTA AQUÍ ---
 
-                                lote_insercion.append({
-                                    "num_empleado": emp_id,
-                                    "nombre_empleado": nombre_emp,
-                                    "curso_evaluado": curso_actual,
-                                    "fecha_entrenamiento": fecha_dt.isoformat(),
-                                    "calificacion_total": calif_total,
-                                    "detalle_respuestas": detalle,
-                                    "archivo_origen": archivo_sem.name
-                                })
+                            lote_insercion.append({
+                                "num_empleado": emp_id,
+                                "nombre_empleado": nombre_emp,
+                                "curso_evaluado": curso_actual,
+                                "fecha_entrenamiento": fecha_dt.isoformat(),
+                                "calificacion_total": calif_total,
+                                "detalle_respuestas": detalle,
+                                "archivo_origen": archivo_sem.name
+                            })
 
                             # 3. Inserción Masiva
                             if lote_insercion:
