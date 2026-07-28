@@ -756,18 +756,20 @@ with tab_certificados:
                 anio_cert = str(fecha_curso.year)
                 nombre_curso_cert = datos_curso['curso_evaluado']
                 
-                # --- GENERACIÓN DE FOLIO ---
-                # Verificar si ya tiene un folio manual guardado
+                # --- GENERACIÓN DE FOLIO AJUSTADA ---
                 detalle_json = datos_curso.get('detalle_respuestas', {})
                 folio_cert = ""
                 
                 if isinstance(detalle_json, dict) and 'num_certificado' in detalle_json and str(detalle_json['num_certificado']).strip():
                     folio_cert = str(detalle_json['num_certificado']).strip()
                 else:
-                    # Limpiamos el nombre del curso (quitamos espacios y caracteres especiales)
-                    curso_limpio = re.sub(r'[^a-zA-Z0-9]', '', nombre_curso_cert).upper()
+                    # 1. Extraer nombre del curso SOLO hasta antes del primer guion
+                    curso_base = nombre_curso_cert.split('-')[0].strip()
                     
-                    # Consultamos cuántos certificados de ESTE curso, ESTE año, se han aprobado ANTES o IGUAL a esta fecha
+                    # 2. Limpiar el texto extraído (sin espacios ni caracteres especiales)
+                    curso_limpio = re.sub(r'[^a-zA-Z0-9]', '', curso_base).upper()
+                    
+                    # Consultamos cuántos certificados de ESTE curso, ESTE año, se han aprobado
                     inicio_anio = f"{anio_cert}-01-01T00:00:00"
                     fecha_limite = datos_curso['fecha_entrenamiento']
                     try:
@@ -778,18 +780,16 @@ with tab_certificados:
                             .lte("fecha_entrenamiento", fecha_limite) \
                             .gte("calificacion_total", 8.0) \
                             .execute()
-                        # El consecutivo es la cantidad de registros encontrados
                         consecutivo = len(resp_seq.data)
                     except:
                         consecutivo = 1
                         
                     consecutivo_str = str(consecutivo).zfill(4)
                     folio_cert = f"BCSQRO-{curso_limpio}-{anio_cert}-{consecutivo_str}"
-                # ---------------------------
+                # ------------------------------------
                 
                 if st.button("🖼️ Generar Vista Previa del Certificado", type="primary"):
                     
-                    # HTML original inyectando datos y el Folio en la parte inferior izquierda
                     html_certificado = f"""
                     <!DOCTYPE html>
                     <html lang="es">
@@ -817,7 +817,6 @@ with tab_certificados:
                         </style>
                     </head>
                     <body class="flex flex-col lg:flex-row h-screen">
-                        <!-- Sidebar -->
                         <aside class="no-print w-96 bg-slate-900 border-r border-slate-800 flex flex-col h-full z-20">
                             <div class="p-4 border-b border-slate-800 bg-slate-950 flex justify-between items-center">
                                 <h1 class="font-bold text-white"><i class="fa-solid fa-award text-red-600 mr-2"></i>Editor BCS</h1>
@@ -841,7 +840,6 @@ with tab_certificados:
                             </div>
                         </aside>
 
-                        <!-- Canvas -->
                         <main class="flex-1 bg-slate-950 flex flex-col items-center justify-center p-8 overflow-hidden relative">
                             <div class="no-print absolute top-4 right-4 space-x-2 z-50 text-white">
                                 <button onclick="zoom(0.9)" class="bg-slate-800 px-3 py-1 rounded">-</button>
@@ -875,13 +873,7 @@ with tab_certificados:
                                     </div>
                                     
                                     <div class="flex justify-between items-end pb-4 px-12 relative">
-                                        <!-- SECCIÓN DEL FOLIO EN LA ESQUINA INFERIOR IZQUIERDA -->
-                                        <div class="w-1/4 pb-4">
-                                            <div class="text-[10px] text-slate-500 font-mono tracking-widest uppercase">
-                                                FOLIO: <span id="certFolio" contenteditable="true" class="font-semibold">{folio_cert}</span>
-                                            </div>
-                                        </div>
-                                        
+                                        <div class="w-1/4"></div>
                                         <div class="text-center w-2/5">
                                             <div class="w-full border-b border-slate-400 mb-2"></div>
                                             <div id="certTrainer" contenteditable="true" class="text-sm font-bold tracking-wider uppercase">NOMBRE DEL CAPACITADOR</div>
@@ -892,6 +884,12 @@ with tab_certificados:
                                         </div>
                                     </div>
                                 </div>
+                                
+                                <!-- NUEVA UBICACIÓN DEL FOLIO: ESQUINA INFERIOR DERECHA -->
+                                <div class="absolute bottom-6 right-12 text-[10px] text-slate-500 font-mono tracking-widest uppercase whitespace-nowrap z-20">
+                                    FOLIO: <span id="certFolio" contenteditable="true" class="font-semibold">{folio_cert}</span>
+                                </div>
+                                
                             </div>
                         </main>
                         <script>
@@ -919,5 +917,6 @@ with tab_certificados:
             else:
                 st.warning("Este empleado no tiene cursos registrados con calificación aprobatoria (≥ 8.0).")
 
+                
 with tab_auditoria:
     st.info("El escaneo cronológico ahora requerirá agrupar por `num_empleado` y por `curso_evaluado` para buscar brechas de tiempo (gaps) independientemente en cada materia.")
