@@ -143,6 +143,7 @@ with tab_semanal:
                                 raw_nombre = row.get(col_nom)
                                 nombre_emp = "Sin Nombre" if pd.isna(raw_nombre) else str(raw_nombre).strip()[:100]
 
+                                # --- REEMPLAZA DESDE AQUÍ ---
                                 # Extracción de puntajes base 10
                                 detalle = {}
                                 for cp in cols_preguntas:
@@ -150,10 +151,17 @@ with tab_semanal:
                                         continue 
                                     
                                     col_respuesta_texto = cp.replace("Puntos: ", "", 1).strip()
+                                    
+                                    # Solo evaluamos la pregunta si hay una respuesta de texto válida
                                     if col_respuesta_texto in df_raw.columns:
                                         respuesta = row.get(col_respuesta_texto)
+                                        # Si la respuesta es NaN o cadena vacía, ignoramos la pregunta entera
                                         if pd.isna(respuesta) or str(respuesta).strip() == '':
                                             continue 
+                                    else:
+                                        # Si por algún motivo la columna de texto no existe pero sí la de puntos
+                                        # asumimos que no se debe contar (pasa con bugs de Forms)
+                                        continue
 
                                     val_raw = row.get(cp, 0)
                                     try:
@@ -163,10 +171,12 @@ with tab_semanal:
 
                                 total_reactivos = len(detalle)
                                 if total_reactivos > 0:
+                                    # Cuenta cuántas respuestas tuvieron un valor mayor a 0
                                     aciertos = sum([1.0 for v in detalle.values() if float(v) > 0])
                                     calif_total = round((aciertos / total_reactivos) * 10.0, 2)
                                 else:
                                     calif_total = 0.0
+                                # --- HASTA AQUÍ ---
 
                                 lote_insercion.append({
                                     "num_empleado": emp_id,
